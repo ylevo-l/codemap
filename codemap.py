@@ -282,7 +282,7 @@ def collect_visible_files(n: TreeNode) -> List[Tuple[str, str]]:
 
 
 def copy_files_subloop(stdscr: Any, visible_files: List[Tuple[str, str]]) -> str:
-    text_lines: List[str] = ["Below is the collected code from all visible, enabled files.\n"]
+    text_lines: List[str] = [""]
     max_y: int
     max_x: int
     max_y, max_x = stdscr.getmaxyx()
