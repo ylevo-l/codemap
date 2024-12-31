@@ -29,7 +29,6 @@ import sys
 import time
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
-
 STATE_FILE: str = ".tree_state.json"
 SUCCESS_MESSAGE_DURATION: float = 0.5
 
@@ -282,7 +281,7 @@ def collect_visible_files(n: TreeNode) -> List[Tuple[str, str]]:
 
 
 def copy_files_subloop(stdscr: Any, visible_files: List[Tuple[str, str]]) -> str:
-    text_lines: List[str] = [""]
+    text_lines: List[str] = ["Below is the collected code from all visible, enabled files.\n"]
     max_y: int
     max_x: int
     max_y, max_x = stdscr.getmaxyx()
@@ -442,11 +441,12 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any]) -> None
         elif 97 <= key <= 122:
             shift_mode = False
 
-        if key == curses.KEY_UP:
+        # Handle navigation and toggle keys
+        if key in (curses.KEY_UP, ord('w'), ord('W')):
             current_index = max(0, current_index - 1)
-        elif key == curses.KEY_DOWN:
+        elif key in (curses.KEY_DOWN, ord('s'), ord('S')):
             current_index = min(len(flattened) - 1, current_index + 1)
-        elif key in (curses.KEY_ENTER, 10, 13, 32):
+        elif key in (curses.KEY_ENTER, 10, 13):
             nd, _ = flattened[current_index]
             if nd.is_dir:
                 toggle_node(nd)
