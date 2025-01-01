@@ -41,9 +41,16 @@ Navigate through your directory structure and perform actions using the followin
     ```bash
     pip install -r requirements.txt
     ```
+    
 4. **Setup CodeMap**:
 
     ```bash
     pip install -e .
+    ```
+    
+4. **Run CodeMap**:
+
+    ```bash
+    codemap
     ```
     
