@@ -22,7 +22,7 @@ Usage:
 
 import argparse, curses, json, os, random, string, subprocess, sys, time
 from typing import Any, Dict, Generator, List, Optional, Tuple
-import tiktoken
+import tiktoken  # Import tiktoken for accurate token counting
 
 STATE_FILE = ".tree_state.json"
 SUCCESS_MESSAGE_DURATION = 0.5
@@ -52,8 +52,9 @@ class AppConfig:
         self.copy_format = copy_format
         self.path_mode = path_mode
 
+# Initialize tiktoken encoding for the desired model
 try:
-    ENCODING = tiktoken.encoding_for_model("gpt-4o") 
+    ENCODING = tiktoken.encoding_for_model("gpt-4o")  # Replace "gpt-4o" with your specific model if different
 except KeyError:
     print("Error: Model encoding not found. Please check the model name or ensure it's supported by tiktoken.")
     sys.exit(1)
@@ -102,7 +103,7 @@ class TreeNode:
         self.anonymized = False
         self.disabled = None if is_dir else False
         self.children: List['TreeNode'] = []
-        self.token_count: int = 0
+        self.token_count: int = 0  # For files: token count; for dirs: cumulative token count
     def add_child(self, n: "TreeNode") -> None:
         """Add a child TreeNode."""
         self.children.append(n)
@@ -299,10 +300,10 @@ def init_colors() -> None:
     """Initialize color pairs for the UI."""
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN, -1)
-    curses.init_pair(2, curses.COLOR_GREEN, -1)
-    curses.init_pair(3, curses.COLOR_RED, -1)
-    curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)
+    curses.init_pair(1, curses.COLOR_CYAN, -1)  # Files
+    curses.init_pair(2, curses.COLOR_GREEN, -1)  # Directories
+    curses.init_pair(3, curses.COLOR_RED, -1)    # Disabled files
+    curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Success message
 
 def safe_addnstr(stdscr: Any, y: int, x: int, s: str, c: int) -> None:
     """Safely add a string to the screen, preventing overflow."""
@@ -498,7 +499,7 @@ def main() -> None:
     parser.add_argument(
         "--path-mode",
         choices=["relative", "basename"],
-        default="basename",
+        default="relative",
         help="Display full relative paths or just the file/folder name."
     )
     args = parser.parse_args()
