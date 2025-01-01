@@ -15,7 +15,7 @@ CodeMap is a single-file Python tool that provides a scrollable and interactive 
 
 Navigate through your directory structure and perform actions using the following key bindings:
 
-- **[UP]/[DOWN]**: Navigate the tree
+- **[W]/[S]**: Navigate the tree
 - **[e]/[E]**: Expand/collapse a single folder or entire subtree
 - **[a]/[A]**: Anonymize/de-anonymize a single folder or entire subtree
 - **[d]**: Enable/disable a single file
