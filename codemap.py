@@ -18,503 +18,355 @@ Usage:
 - [q]: Quit (saves state to .tree_state.json)
 """
 
-import argparse
-import curses
-import json
-import os
-import random
-import string
-import subprocess
-import sys
-import time
+import argparse, curses, json, os, random, string, subprocess, sys, time
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
-STATE_FILE: str = ".tree_state.json"
-SUCCESS_MESSAGE_DURATION: float = 0.5
+STATE_FILE=".tree_state.json"
+SUCCESS_MESSAGE_DURATION=0.5
+IGNORED_FOLDERS=["__pycache__","node_modules","dist","build","venv",".git",".svn",".hg",".idea",".vscode"]
+IGNORED_MISC=[".env",".DS_Store","Thumbs.db",".bak",".tmp","desktop.ini"]
+IGNORED_LOGS=[".log",".db",".key",".pyc",".exe",".dll",".so",".dylib"]
+IGNORED_PATTERNS=IGNORED_FOLDERS+IGNORED_MISC+IGNORED_LOGS
+ALLOWED_PYTHON=[".py",".pyi",".pyc",".pyo",".pyd"]
+ALLOWED_DOCS=[".txt",".md",".rst",".docx",".pdf",".odt"]
+ALLOWED_CONFIG=[".json",".yaml",".yml",".toml",".ini",".cfg"]
+ALLOWED_SCRIPTS=[".sh",".bat",".ps1",".bash",".zsh"]
+ALLOWED_MEDIA=[".jpg",".jpeg",".png",".gif",".bmp",".svg",".mp3",".wav",".mp4",".avi",".mkv"]
+ALLOWED_EXTENSIONS=ALLOWED_PYTHON+ALLOWED_DOCS+ALLOWED_CONFIG+ALLOWED_SCRIPTS+ALLOWED_MEDIA
+DEFAULT_COPY_FORMAT="blocks"
+COPY_FORMAT_PRESETS={"blocks":"{path}:\n\"\"\"\n{content}\n\"\"\"\n","lines":"{path}: {content}\n","raw":"{content}\n"}
+SCROLL_SPEED={"normal":1,"accelerated":5}
+MAX_TREE_DEPTH=10
+SIZE_DISPLAY_THRESHOLD=10*1024*1024
+ANONYMIZED_PREFIXES=["Folder","Project","Repo","Alpha","Beta","Omega","Block","Archive","Data","Source"]
+INPUT_TIMEOUT=0.1
 
-IGNORED_FOLDERS: List[str] = [
-    "__pycache__",
-    "node_modules",
-    "dist",
-    "build",
-    "venv",
-]
-IGNORED_MISC: List[str] = [
-    ".env",
-    ".DS_Store",
-    "Thumbs.db",
-]
-IGNORED_LOGS: List[str] = [
-    ".log",
-    ".db",
-    ".key",
-    ".pyc",
-]
-IGNORED_PATTERNS: List[str] = IGNORED_FOLDERS + IGNORED_MISC + IGNORED_LOGS
+class AppConfig:
+    def __init__(self,copy_format:str,path_mode:str):
+        self.copy_format=copy_format
+        self.path_mode=path_mode
 
-ALLOWED_PYTHON: List[str] = [".py", ".pyi"]
-ALLOWED_DOCS: List[str] = [".txt", ".md", ".rst"]
-ALLOWED_CONFIG: List[str] = [".json", ".yaml", ".yml", ".toml"]
-ALLOWED_SCRIPTS: List[str] = [".sh", ".bat"]
-ALLOWED_EXTENSIONS: List[str] = ALLOWED_PYTHON + ALLOWED_DOCS + ALLOWED_CONFIG + ALLOWED_SCRIPTS
+def human_readable_size(s:int)->str:
+    if s<1024:return f"{s}B"
+    elif s<1024**2:return f"{s/1024:.1f}K"
+    elif s<1024**3:return f"{s/(1024**2):.1f}M"
+    return f"{s/(1024**3):.1f}G"
 
-
-def human_readable_size(size_in_bytes: int) -> str:
-    if size_in_bytes < 1024:
-        return f"{size_in_bytes}B"
-    elif size_in_bytes < 1024**2:
-        return f"{size_in_bytes / 1024:.1f}K"
-    elif size_in_bytes < 1024**3:
-        return f"{size_in_bytes / (1024**2):.1f}M"
-    return f"{size_in_bytes / (1024**3):.1f}G"
-
-
-def copy_text_to_clipboard(text: str) -> None:
+def copy_text_to_clipboard(t:str)->None:
     try:
-        if sys.platform.startswith('win'):
-            p = subprocess.Popen('clip', stdin=subprocess.PIPE, shell=True)
-            p.communicate(input=text.encode('utf-16'))
-        elif sys.platform.startswith('darwin'):
-            p = subprocess.Popen('pbcopy', stdin=subprocess.PIPE)
-            p.communicate(input=text.encode('utf-8'))
+        if sys.platform.startswith("win"):
+            p=subprocess.Popen("clip",stdin=subprocess.PIPE,shell=True)
+            p.communicate(input=t.encode("utf-16"))
+        elif sys.platform.startswith("darwin"):
+            p=subprocess.Popen("pbcopy",stdin=subprocess.PIPE)
+            p.communicate(input=t.encode("utf-8"))
         else:
-            p = subprocess.Popen(['xclip', '-selection', 'clipboard'], stdin=subprocess.PIPE)
-            p.communicate(input=text.encode('utf-8'))
-    except Exception as exc:
-        print(f"Copy error: {exc}")
-
+            p=subprocess.Popen(["xclip","-selection","clipboard"],stdin=subprocess.PIPE)
+            p.communicate(input=t.encode("utf-8"))
+    except:pass
 
 class FileFilter:
-    def __init__(self, ignored_patterns: Optional[List[str]] = None, allowed_extensions: Optional[List[str]] = None):
-        self.ignored_patterns: List[str] = ignored_patterns or []
-        self.allowed_extensions: List[str] = allowed_extensions or []
-
-    def is_ignored(self, name: str) -> bool:
-        for patt in self.ignored_patterns:
-            if patt in name:
-                return True
-        _, ext = os.path.splitext(name)
-        if self.allowed_extensions and ext and (ext.lower() not in self.allowed_extensions):
-            return True
+    def __init__(self,ignored_patterns:Optional[List[str]]=None,allowed_extensions:Optional[List[str]]=None):
+        self.ignored_patterns=ignored_patterns or []
+        self.allowed_extensions=allowed_extensions or []
+    def is_ignored(self,n:str)->bool:
+        for p in self.ignored_patterns:
+            if p in n:return True
+        _,ext=os.path.splitext(n)
+        if self.allowed_extensions and ext and ext.lower() not in self.allowed_extensions:return True
         return False
 
-
 class TreeNode:
-    def __init__(self, path: str, is_dir: bool = False, expanded: bool = False):
-        self.path: str = path
-        self.is_dir: bool = is_dir
-        self.expanded: bool = expanded
-        self.original_name: str = os.path.basename(path)
-        self.display_name: str = self.original_name
-        self.anonymized: bool = False
-        self.disabled: Optional[bool] = False if not is_dir else None
-        self.children: List['TreeNode'] = []
+    def __init__(self,p:str,is_dir:bool=False,expanded:bool=False):
+        self.path=p
+        self.is_dir=is_dir
+        self.expanded=expanded
+        self.original_name=os.path.basename(p)
+        self.display_name=self.original_name
+        self.anonymized=False
+        self.disabled=None if is_dir else False
+        self.children=[]
+    def add_child(self,n:"TreeNode")->None:
+        self.children.append(n)
+    def sort_children(self)->None:
+        self.children.sort(key=lambda x:(not x.is_dir,x.display_name.lower()))
 
-    def add_child(self, node: 'TreeNode') -> None:
-        self.children.append(node)
-
-    def sort_children(self) -> None:
-        self.children.sort(key=lambda n: (not n.is_dir, n.display_name.lower()))
-
-
-def build_tree(root_path: str, file_filter: FileFilter) -> TreeNode:
-    root_node: TreeNode = TreeNode(root_path, is_dir=True, expanded=True)
-
-    def walk_dir(parent: TreeNode, directory: str) -> None:
-        try:
-            entries: List[str] = sorted(os.listdir(directory))
-        except PermissionError:
-            return
-        filtered: List[str] = []
-        for e in entries:
-            full: str = os.path.join(directory, e)
-            if file_filter.is_ignored(e):
-                continue
-            if os.path.isdir(full) or os.path.isfile(full):
-                filtered.append(e)
-
-        for item in filtered:
-            full_path: str = os.path.join(directory, item)
-            if os.path.isdir(full_path):
-                child_node: TreeNode = TreeNode(full_path, is_dir=True, expanded=False)
-                parent.add_child(child_node)
-                walk_dir(child_node, full_path)
+def build_tree(rp:str,f:FileFilter)->TreeNode:
+    root=TreeNode(rp,True,True)
+    def w(p:TreeNode,d:str,depth:int=0)->None:
+        if depth>MAX_TREE_DEPTH:return
+        try:e=sorted(os.listdir(d))
+        except:return
+        flt=[]
+        for i in e:
+            x=os.path.join(d,i)
+            if f.is_ignored(i):continue
+            if os.path.isdir(x)or os.path.isfile(x):flt.append(i)
+        for j in flt:
+            fp=os.path.join(d,j)
+            if os.path.isdir(fp):
+                c=TreeNode(fp,True,False)
+                p.add_child(c)
+                w(c,fp,depth+1)
             else:
-                child_node: TreeNode = TreeNode(full_path, is_dir=False)
-                parent.add_child(child_node)
+                c=TreeNode(fp,False,False)
+                p.add_child(c)
+        p.sort_children()
+    w(root,rp,0)
+    return root
 
-        parent.sort_children()
-
-    walk_dir(root_node, root_path)
-
-    with open("tree_debug.log", "w", encoding="utf-8") as f:
-        def log_tree(nd: TreeNode, depth: int = 0) -> None:
-            prefix: str = ("│  " * depth) if depth > 0 else ""
-            toggle: str = "●" if nd.is_dir and nd.expanded else ("○" if nd.is_dir else " ")
-            f.write(f"{prefix}{toggle} {nd.display_name}\n")
-            if nd.is_dir:
-                for c in nd.children:
-                    log_tree(c, depth + 1)
-        log_tree(root_node)
-    return root_node
-
-
-def load_state(file_path: str) -> Dict[str, Any]:
-    if os.path.isfile(file_path):
+def load_state(fp:str)->Dict[str,Any]:
+    if os.path.isfile(fp):
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return {}
-    return {}
+            with open(fp,"r",encoding="utf-8")as f:return json.load(f)
+        except:return {}
+    return{}
 
-
-def save_state(file_path: str, state_dict: Dict[str, Any]) -> None:
+def save_state(fp:str,d:Dict[str,Any])->None:
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(state_dict, f, indent=2)
-    except IOError:
-        pass
+        with open(fp,"w",encoding="utf-8")as f:json.dump(d,f,indent=2)
+    except:pass
 
-
-def apply_state(node: TreeNode, states: Dict[str, Any]) -> None:
-    if node.path in states:
-        st: Dict[str, Any] = states[node.path]
-        node.expanded = st.get("expanded", node.is_dir)
-        node.anonymized = st.get("anonymized", False)
-        if node.anonymized:
-            node.display_name = st.get("anonymized_name", node.original_name)
+def apply_state(n:TreeNode,s:Dict[str,Any])->None:
+    if n.path in s:
+        st=s[n.path]
+        n.expanded=st.get("expanded",n.is_dir)
+        n.anonymized=st.get("anonymized",False)
+        if n.anonymized:
+            n.display_name=st.get("anonymized_name",n.original_name)
         else:
-            node.display_name = node.original_name
-        if not node.is_dir:
-            node.disabled = st.get("disabled", False)
+            n.display_name=n.original_name
+        if not n.is_dir:
+            n.disabled=st.get("disabled",False)
+    for c in n.children:apply_state(c,s)
 
-    for child in node.children:
-        apply_state(child, states)
-
-
-def gather_state(node: TreeNode, states: Dict[str, Any]) -> None:
-    if node.path not in states:
-        states[node.path] = {}
-    states[node.path]["expanded"] = node.expanded
-    states[node.path]["anonymized"] = node.anonymized
-    if node.anonymized:
-        states[node.path]["anonymized_name"] = node.display_name
+def gather_state(n:TreeNode,s:Dict[str,Any])->None:
+    if n.path not in s:s[n.path]={}
+    s[n.path]["expanded"]=n.expanded
+    s[n.path]["anonymized"]=n.anonymized
+    if n.anonymized:
+        s[n.path]["anonymized_name"]=n.display_name
     else:
-        states[node.path]["anonymized_name"] = None
-    if not node.is_dir:
-        states[node.path]["disabled"] = node.disabled
+        s[n.path]["anonymized_name"]=None
+    if not n.is_dir:
+        s[n.path]["disabled"]=n.disabled
+    for c in n.children:gather_state(c,s)
 
-    for c in node.children:
-        gather_state(c, states)
+def generate_anonymized_name()->str:
+    return random.choice(ANONYMIZED_PREFIXES)+"_"+("".join(random.choices(string.ascii_uppercase+string.digits,k=4)))
 
+def toggle_node(n:TreeNode)->None:
+    if n.is_dir:n.expanded=not n.expanded
 
-def generate_anonymized_name() -> str:
-    prefixes: List[str] = ["Folder", "Project", "Repo", "Alpha", "Beta", "Omega", "Block"]
-    prefix: str = random.choice(prefixes)
-    suffix: str = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
-    return f"{prefix}_{suffix}"
-
-
-def toggle_node(n: TreeNode) -> None:
+def anonymize_toggle(n:TreeNode)->None:
     if n.is_dir:
-        n.expanded = not n.expanded
+        x=not n.anonymized
+        n.anonymized=x
+        n.display_name=generate_anonymized_name()if x else n.original_name
 
+def set_subtree_expanded(n:TreeNode,e:bool)->None:
+    n.expanded=e
+    for c in n.children:
+        if c.is_dir:set_subtree_expanded(c,e)
 
-def anonymize_toggle(n: TreeNode) -> None:
+def toggle_subtree(n:TreeNode)->None:
     if n.is_dir:
-        if not n.anonymized:
-            n.anonymized = True
-            n.display_name = generate_anonymized_name()
-        else:
-            n.anonymized = False
-            n.display_name = n.original_name
+        x=not n.expanded
+        set_subtree_expanded(n,x)
 
-
-def toggle_subtree(n: TreeNode) -> None:
+def anonymize_subtree(n:TreeNode)->None:
     if n.is_dir:
-        n.expanded = not n.expanded
-        for c in n.children:
-            toggle_subtree(c)
+        x=not n.anonymized
+        n.anonymized=x
+        n.display_name=generate_anonymized_name()if x else n.original_name
+        for c in n.children:anonymize_subtree(c)
 
-
-def anonymize_subtree(n: TreeNode) -> None:
-    if n.is_dir:
-        new_state: bool = not n.anonymized
-        n.anonymized = new_state
-        if new_state:
-            n.display_name = generate_anonymized_name()
-        else:
-            n.display_name = n.original_name
-        for c in n.children:
-            anonymize_subtree(c)
-
-
-def flatten_tree(n: TreeNode, depth: int = 0) -> Generator[Tuple[TreeNode, int], None, None]:
-    yield (n, depth)
+def flatten_tree(n:TreeNode,d:int=0)->Generator[Tuple[TreeNode,int],None,None]:
+    yield(n,d)
     if n.is_dir and n.expanded:
-        for c in n.children:
-            yield from flatten_tree(c, depth + 1)
+        for c in n.children:yield from flatten_tree(c,d+1)
 
-
-def collect_visible_files(n: TreeNode) -> List[Tuple[str, str]]:
-    results: List[Tuple[str, str]] = []
-
-    def gather(nd: TreeNode, prefix_parts: List[str]) -> None:
-        new_parts: List[str] = prefix_parts + [nd.display_name]
+def collect_visible_files(n:TreeNode,path_mode:str)->List[Tuple[str,str]]:
+    r=[]
+    def g(nd:TreeNode,p:List[str]):
+        z=p+[nd.display_name]
         if nd.is_dir and nd.expanded:
-            for ch in nd.children:
-                gather(ch, new_parts)
-        elif not nd.is_dir:
-            if not nd.disabled:
-                rel_path: str = os.path.join(*new_parts)
-                content: str = ""
-                try:
-                    with open(nd.path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                except Exception:
-                    content = "<Could not read file>"
-                results.append((rel_path, content))
+            for ch in nd.children:g(ch,z)
+        elif not nd.is_dir and nd.disabled==False:
+            rp=os.path.join(*z)if path_mode=="relative"else nd.display_name
+            ct=""
+            try:
+                with open(nd.path,"r",encoding="utf-8")as f:ct=f.read()
+            except:ct="<Could not read file>"
+            r.append((rp,ct))
+    g(n,[])
+    return r
 
-    gather(n, [])
-    return results
-
-
-def copy_files_subloop(stdscr: Any, visible_files: List[Tuple[str, str]]) -> str:
-    text_lines: List[str] = [""]
-    max_y: int
-    max_x: int
-    max_y, max_x = stdscr.getmaxyx()
-    total: int = len(visible_files)
-
-    for idx, (rel_path, content) in enumerate(visible_files, start=1):
-        text_lines.append(f"{rel_path}:")
-        text_lines.append('"""')
-        text_lines.append(content if content else "<Could not read file>")
-        text_lines.append('"""')
-        text_lines.append("")
-
-        bar_width: int = max(10, max_x - 25)
-        done: int = int(bar_width * (idx / total)) if total else 0
-        remain: int = bar_width - done
-        bar_str: str = "#" * done + " " * remain
-        progress_str: str = f"Copying {idx}/{total} files: [{bar_str}]"
-
+def copy_files_subloop(stdscr:Any,vf:List[Tuple[str,str]],fmt:str)->str:
+    lines=[]
+    my,mx=stdscr.getmaxyx()
+    t=len(vf)
+    for i,(rp,ct) in enumerate(vf,1):
+        fs=fmt
+        if fs not in COPY_FORMAT_PRESETS:fs="blocks"
+        block=COPY_FORMAT_PRESETS[fs].format(path=rp,content=ct if ct else"<Could not read file>")
+        lines.append(block)
+        bw=max(10,mx-25)
+        dn=int(bw*(i/t))if t else 0
+        rm=bw-dn
+        bs="#"*dn+" "*rm
+        ps=f"Copying {i}/{t} files: [{bs}]"
         stdscr.clear()
-        stdscr.addnstr(max_y - 1, 0, progress_str, max_x - 1)
+        stdscr.addnstr(my-1,0,ps,mx-1)
         stdscr.refresh()
+    return"".join(lines)
 
-    return "\n".join(text_lines)
-
-
-def init_colors() -> None:
+def init_colors()->None:
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN, -1)
+    curses.init_pair(1,curses.COLOR_CYAN,-1)
+    curses.init_pair(2,curses.COLOR_GREEN,-1)
+    curses.init_pair(3,curses.COLOR_RED,-1)
+    curses.init_pair(4,curses.COLOR_WHITE,curses.COLOR_BLUE)
 
-
-def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any]) -> None:
+def run_curses(stdscr:Any,root:TreeNode,states:Dict[str,Any],fmt:str,path_mode:str)->None:
     curses.curs_set(0)
     stdscr.nodelay(False)
     stdscr.keypad(True)
-
+    curses.halfdelay(int(INPUT_TIMEOUT*10))
     init_colors()
-
-    current_index: int = 0
-    scroll_offset: int = 0
-    shift_mode: bool = False
-
-    copying_success: bool = False
-    success_message_time: float = 0.0
-
-    root_path: str = root_node.path
-
+    ci=0
+    so=0
+    sm=False
+    cs=False
+    stime=0.0
     while True:
-        now: float = time.time()
-        if copying_success and (now - success_message_time > SUCCESS_MESSAGE_DURATION):
-            copying_success = False
-
+        n=time.time()
+        if cs and(n-stime>SUCCESS_MESSAGE_DURATION):cs=False
         stdscr.clear()
-        max_y: int
-        max_x: int
-        max_y, max_x = stdscr.getmaxyx()
-
-        flattened: List[Tuple[TreeNode, int]] = list(flatten_tree(root_node))
-        visible_lines: int = max_y - 1
-
-        if current_index < 0:
-            current_index = 0
-        elif current_index >= len(flattened):
-            current_index = max(0, len(flattened) - 1)
-        if current_index < scroll_offset:
-            scroll_offset = current_index
-        elif current_index >= scroll_offset + visible_lines:
-            scroll_offset = current_index - visible_lines + 1
-
-        for i in range(scroll_offset, min(scroll_offset + visible_lines, len(flattened))):
-            node, depth = flattened[i]
-            is_selected: bool = (i == current_index)
-
-            y: int = i - scroll_offset
-            x: int = 0
-
-            arrow: str = "> " if is_selected else "  "
-            stdscr.addstr(y, x, arrow, curses.color_pair(0))
-            x += len(arrow)
-
-            prefix: str = "│  " * depth
-            stdscr.addstr(y, x, prefix, curses.color_pair(0))
-            x += len(prefix)
-
-            if node.is_dir:
-                text: str = node.display_name
-                stdscr.addstr(y, x, text, curses.color_pair(0))
-                x += len(text)
-
-                try:
-                    size_str: str = human_readable_size(os.path.getsize(node.path))
-                except OSError:
-                    size_str = "?"
-                size_text: str = f"  ({size_str})"
-                if x + len(size_text) >= max_x:
-                    size_text = size_text[:max_x - x - 1] + "..."
-                stdscr.addstr(y, x, size_text, curses.color_pair(0))
-            else:
-                text: str = node.display_name
-                stdscr.addstr(y, x, text, curses.color_pair(1))
-                x += len(text)
-
-                if node.disabled:
-                    disabled_text: str = " (DISABLED)"
-                    if x + len(disabled_text) >= max_x:
-                        disabled_text = disabled_text[:max_x - x - 1] + "..."
-                    stdscr.addstr(y, x, disabled_text, curses.color_pair(0))
-                    x += len(disabled_text)
-
-                try:
-                    size_str: str = human_readable_size(os.path.getsize(node.path))
-                except OSError:
-                    size_str = "?"
-                size_text: str = f"  ({size_str})"
-                if x + len(size_text) >= max_x:
-                    size_text = size_text[:max_x - x - 1] + "..."
-                stdscr.addstr(y, x, size_text, curses.color_pair(0))
-
-        if copying_success:
-            msg: str = "Successfully Saved to Clipboard"
-            padded: str = msg + " " * (max_x - len(msg))
-            stdscr.addnstr(max_y - 1, 0, padded, max_x - 1)
-        else:
-            instr_line: str = ""
-            if flattened:
-                node, _ = flattened[current_index]
-                if node.is_dir:
-                    if shift_mode:
-                        instr_line += "[E] Toggle All"
-                        if not node.anonymized:
-                            instr_line += "  [A] Anonymize All"
-                        else:
-                            instr_line += "  [A] De-Anonymize All"
-                    else:
-                        instr_line += "[e] Toggle"
-                        if not node.anonymized:
-                            instr_line += "  [a] Anonymize"
-                        else:
-                            instr_line += "  [a] De-Anonymize"
-                else:
-                    if node.disabled:
-                        instr_line += "[d] Enable"
-                    else:
-                        instr_line += "[d] Disable"
-
-                instr_line += "   [c] Copy"
-            stdscr.addnstr(max_y - 1, 0, instr_line, max_x - 1)
-
-        stdscr.refresh()
-
-        key: int = stdscr.getch()
-        if key == -1:
-            continue
-
-        if 65 <= key <= 90:
-            shift_mode = True
-        elif 97 <= key <= 122:
-            shift_mode = False
-
-        # Handle navigation and toggle keys
-        if key in (curses.KEY_UP, ord('w'), ord('W')):
-            current_index = max(0, current_index - 1)
-        elif key in (curses.KEY_DOWN, ord('s'), ord('S')):
-            current_index = min(len(flattened) - 1, current_index + 1)
-        elif key in (curses.KEY_ENTER, 10, 13):
-            nd, _ = flattened[current_index]
+        my,mx=stdscr.getmaxyx()
+        fz=list(flatten_tree(root))
+        vl=my-1
+        if ci<0:ci=0
+        elif ci>=len(fz):ci=max(0,len(fz)-1)
+        if ci<so:so=ci
+        elif ci>=so+vl:so=ci-vl+1
+        for i in range(so,min(so+vl,len(fz))):
+            nd,dp=fz[i]
+            sel=(i==ci)
+            y=i-so
+            x=0
+            ar="> "if sel else"  "
+            stdscr.addstr(y,x,ar)
+            x+=len(ar)
+            px="│  "*dp
+            stdscr.addstr(y,x,px)
+            x+=len(px)
             if nd.is_dir:
-                toggle_node(nd)
-        elif shift_mode:
-            if key == ord('E'):
-                nd, _ = flattened[current_index]
-                if nd.is_dir:
-                    toggle_subtree(nd)
-            elif key == ord('A'):
-                nd, _ = flattened[current_index]
-                if nd.is_dir:
-                    anonymize_subtree(nd)
+                c=2
+                stdscr.addstr(y,x,nd.display_name,curses.color_pair(c))
+                x+=len(nd.display_name)
+                try:
+                    ss=human_readable_size(os.path.getsize(nd.path))
+                except:ss="?"
+                st=f"  ({ss})"
+                if x+len(st)>=mx:st=st[:mx-x-1]+"..."
+                stdscr.addstr(y,x,st)
+            else:
+                c=3 if nd.disabled else 1
+                stdscr.addstr(y,x,nd.display_name,curses.color_pair(c))
+                x+=len(nd.display_name)
+                if nd.disabled:
+                    ds=" (DISABLED)"
+                    if x+len(ds)>=mx:ds=ds[:mx-x-1]+"..."
+                    stdscr.addstr(y,x,ds)
+                    x+=len(ds)
+                try:
+                    ss=human_readable_size(os.path.getsize(nd.path))
+                except:ss="?"
+                st=f"  ({ss})"
+                if x+len(st)>=mx:st=st[:mx-x-1]+"..."
+                stdscr.addstr(y,x,st)
+        if cs:
+            m="Successfully Saved to Clipboard"
+            p=m+" "*(mx-len(m))
+            stdscr.addnstr(my-1,0,p,mx-1)
         else:
-            if key == ord('e'):
-                nd, _ = flattened[current_index]
+            ins=""
+            if fz:
+                nd,_=fz[ci]
                 if nd.is_dir:
-                    toggle_node(nd)
-            elif key == ord('a'):
-                nd, _ = flattened[current_index]
-                if nd.is_dir:
-                    anonymize_toggle(nd)
-            elif key == ord('d'):
-                nd, _ = flattened[current_index]
-                if not nd.is_dir:
-                    nd.disabled = not nd.disabled
-            elif key == ord('c'):
-                visible_files: List[Tuple[str, str]] = collect_visible_files(root_node)
-                if visible_files:
-                    final_text: str = copy_files_subloop(stdscr, visible_files)
-                    copy_text_to_clipboard(final_text)
-                    copying_success = True
-                    success_message_time = time.time()
-
-        if key in (ord('q'), ord('Q')):
-            st: Dict[str, Any] = {}
-            gather_state(root_node, st)
-            save_state(STATE_FILE, st)
+                    if sm:
+                        ins+="[E] Toggle All"
+                        if not nd.anonymized:ins+="  [A] Anonymize All"
+                        else:ins+="  [A] De-Anonymize All"
+                    else:
+                        ins+="[e] Toggle"
+                        if not nd.anonymized:ins+="  [a] Anonymize"
+                        else:ins+="  [a] De-Anonymize"
+                else:
+                    if nd.disabled:ins+="[d] Enable"
+                    else:ins+="[d] Disable"
+                ins+="   [c] Copy"
+            stdscr.addnstr(my-1,0,ins,mx-1)
+        stdscr.refresh()
+        k=stdscr.getch()
+        if k==-1:continue
+        if 65<=k<=90:sm=True
+        elif 97<=k<=122:sm=False
+        sp=SCROLL_SPEED["accelerated"]if sm else SCROLL_SPEED["normal"]
+        if k in(curses.KEY_UP,ord("w"),ord("W")):
+            ci=max(0,ci-sp)
+        elif k in(curses.KEY_DOWN,ord("s"),ord("S")):
+            ci=min(len(fz)-1,ci+sp)
+        elif k in(curses.KEY_ENTER,10,13):
+            nd,_=fz[ci]
+            if nd.is_dir:toggle_node(nd)
+        elif sm:
+            if k==ord("E"):
+                nd,_=fz[ci]
+                if nd.is_dir:toggle_subtree(nd)
+            elif k==ord("A"):
+                nd,_=fz[ci]
+                if nd.is_dir:anonymize_subtree(nd)
+        else:
+            if k==ord("e"):
+                nd,_=fz[ci]
+                if nd.is_dir:toggle_node(nd)
+            elif k==ord("a"):
+                nd,_=fz[ci]
+                if nd.is_dir:anonymize_toggle(nd)
+            elif k==ord("d"):
+                nd,_=fz[ci]
+                if not nd.is_dir:nd.disabled=not nd.disabled
+            elif k==ord("c"):
+                vf=collect_visible_files(root,path_mode)
+                if vf:
+                    ft=copy_files_subloop(stdscr,vf,fmt)
+                    copy_text_to_clipboard(ft)
+                    cs=True
+                    stime=time.time()
+        if k in(ord("q"),ord("Q")):
+            s={}
+            gather_state(root,s)
+            save_state(STATE_FILE,s)
             break
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Scrollable, interactive ASCII tree view of a directory."
-    )
-    parser.add_argument(
-        "directory",
-        nargs="?",
-        default=".",
-        help="Directory to display (defaults to current)."
-    )
-    args = parser.parse_args()
-
-    file_filter: FileFilter = FileFilter(
-        ignored_patterns=IGNORED_PATTERNS,
-        allowed_extensions=ALLOWED_EXTENSIONS
-    )
-
-    root_path: str = os.path.abspath(args.directory)
-    if not os.path.isdir(root_path):
-        print(f"Error: '{root_path}' is not a directory.")
+def main()->None:
+    parser=argparse.ArgumentParser()
+    parser.add_argument("directory",nargs="?",default=".")
+    parser.add_argument("--copy-format",choices=["blocks","lines","raw"],default=DEFAULT_COPY_FORMAT)
+    parser.add_argument("--path-mode",choices=["relative","basename"],default="basename")
+    a=parser.parse_args()
+    if not os.path.isdir(a.directory):
+        print(f"Error: '{a.directory}' is not a directory.")
         sys.exit(1)
+    f=FileFilter(ignored_patterns=IGNORED_PATTERNS,allowed_extensions=ALLOWED_EXTENSIONS)
+    rp=os.path.abspath(a.directory)
+    root=build_tree(rp,f)
+    st=load_state(STATE_FILE)
+    apply_state(root,st)
+    curses.wrapper(run_curses,root,st,a.copy_format,a.path_mode)
 
-    root_node: TreeNode = build_tree(root_path, file_filter)
-    states: Dict[str, Any] = load_state(STATE_FILE)
-    apply_state(root_node, states)
-
-    curses.wrapper(run_curses, root_node, states)
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
