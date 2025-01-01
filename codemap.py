@@ -476,6 +476,7 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
             s = {}
             gather_state(root_node, s)
             save_state(STATE_FILE, s)
+            curses.endwin()
             break
 
 def main() -> None:
