@@ -14,6 +14,9 @@ setup(
     install_requires=[
         'windows-curses; platform_system=="Windows"',
     ],
+    extras_require={
+        'token_counting': ['tiktoken'],
+    },
     entry_points={
         'console_scripts': [
             'codemap=codemap:main',
