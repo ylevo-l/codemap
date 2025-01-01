@@ -43,7 +43,6 @@ COPY_FORMAT_PRESETS = {
 }
 SCROLL_SPEED = {"normal": 1, "accelerated": 5}
 MAX_TREE_DEPTH = 10
-SIZE_DISPLAY_THRESHOLD = 10 * 1024 * 1024
 ANONYMIZED_PREFIXES = ["Folder", "Project", "Repo", "Alpha", "Beta", "Omega", "Block", "Archive", "Data", "Source"]
 INPUT_TIMEOUT = 0.1
 
@@ -52,14 +51,9 @@ class AppConfig:
         self.copy_format = copy_format
         self.path_mode = path_mode
 
-def human_readable_size(s: int) -> str:
-    if s < 1024:
-        return f"{s}B"
-    elif s < 1024**2:
-        return f"{s/1024:.1f}K"
-    elif s < 1024**3:
-        return f"{s/(1024**2):.1f}M"
-    return f"{s/(1024**3):.1f}G"
+def count_tokens(content: str) -> int:
+    # Simple approximation: 1 token per 4 characters
+    return max(1, len(content) // 4)
 
 def copy_text_to_clipboard(t: str) -> None:
     try:
@@ -97,11 +91,20 @@ class TreeNode:
         self.display_name = self.original_name
         self.anonymized = False
         self.disabled = None if is_dir else False
-        self.children = []
+        self.children: List['TreeNode'] = []
+        self.token_count: int = 0  # For files: token count; for dirs: cumulative token count
     def add_child(self, n: "TreeNode") -> None:
         self.children.append(n)
     def sort_children(self) -> None:
         self.children.sort(key=lambda x: (not x.is_dir, x.display_name.lower()))
+    def calculate_token_count(self) -> int:
+        if not self.is_dir:
+            return self.token_count
+        total = 0
+        for child in self.children:
+            total += child.calculate_token_count()
+        self.token_count = total
+        return self.token_count
 
 def build_tree(rp: str, f: FileFilter) -> TreeNode:
     root = TreeNode(rp, True, True)
@@ -127,9 +130,16 @@ def build_tree(rp: str, f: FileFilter) -> TreeNode:
                 w(c, fp, depth + 1)
             else:
                 c = TreeNode(fp, False, False)
+                try:
+                    with open(fp, "r", encoding="utf-8") as file:
+                        content = file.read()
+                        c.token_count = count_tokens(content)
+                except:
+                    c.token_count = 0
                 p.add_child(c)
         p.sort_children()
     w(root, rp, 0)
+    root.calculate_token_count()
     return root
 
 def load_state(fp: str) -> Dict[str, Any]:
@@ -161,6 +171,8 @@ def apply_state(n: TreeNode, s: Dict[str, Any]) -> None:
             n.disabled = st.get("disabled", False)
     for c in n.children:
         apply_state(c, s)
+    if n.is_dir:
+        n.calculate_token_count()
 
 def gather_state(n: TreeNode, s: Dict[str, Any]) -> None:
     if n.path not in s:
@@ -259,10 +271,10 @@ def copy_files_subloop(stdscr: Any, vf: List[Tuple[str, str]], fmt: str) -> str:
 def init_colors() -> None:
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN, -1)
-    curses.init_pair(2, curses.COLOR_GREEN, -1)
-    curses.init_pair(3, curses.COLOR_RED, -1)
-    curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)
+    curses.init_pair(1, curses.COLOR_CYAN, -1)  # Files
+    curses.init_pair(2, curses.COLOR_GREEN, -1)  # Directories
+    curses.init_pair(3, curses.COLOR_RED, -1)    # Disabled files
+    curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Success message
 
 def safe_addnstr(stdscr: Any, y: int, x: int, s: str, c: int) -> None:
     my, mx = stdscr.getmaxyx()
@@ -299,62 +311,59 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
         flattened = list(flatten_tree(root_node))
         visible_lines = my - 1
 
+        # Enforce bounds
         if current_index < 0:
             current_index = 0
         elif current_index >= len(flattened):
             current_index = max(0, len(flattened) - 1)
 
+        # Scroll offset
         if current_index < scroll_offset:
             scroll_offset = current_index
         elif current_index >= scroll_offset + visible_lines:
             scroll_offset = current_index - visible_lines + 1
 
+        # Draw
         for i in range(scroll_offset, min(scroll_offset + visible_lines, len(flattened))):
-            nd, dp = flattened[i]
-            sel = (i == current_index)
+            node, depth = flattened[i]
+            is_selected = (i == current_index)
+
             y = i - scroll_offset
             x = 0
-            ar = "> " if sel else "  "
-            safe_addnstr(stdscr, y, x, ar, 0)
-            x += len(ar)
-            px = "│  " * dp
-            safe_addnstr(stdscr, y, x, px, 0)
-            x += len(px)
-            if nd.is_dir:
-                c = 2
-                safe_addnstr(stdscr, y, x, nd.display_name, c)
-                x += len(nd.display_name)
-                try:
-                    ss = human_readable_size(os.path.getsize(nd.path))
-                except:
-                    ss = "?"
-                st = f"  ({ss})"
-                if x + len(st) >= mx:
-                    st = st[:mx - x - 1] + "..."
-                safe_addnstr(stdscr, y, x, st, 0)
-            else:
-                c = 3 if nd.disabled else 1
-                safe_addnstr(stdscr, y, x, nd.display_name, c)
-                x += len(nd.display_name)
-                if nd.disabled:
-                    ds = " (DISABLED)"
-                    if x + len(ds) >= mx:
-                        ds = ds[:mx - x - 1] + "..."
-                    safe_addnstr(stdscr, y, x, ds, 0)
-                    x += len(ds)
-                try:
-                    ss = human_readable_size(os.path.getsize(nd.path))
-                except:
-                    ss = "?"
-                st = f"  ({ss})"
-                if x + len(st) >= mx:
-                    st = st[:mx - x - 1] + "..."
-                safe_addnstr(stdscr, y, x, st, 0)
 
+            arrow = "> " if is_selected else "  "
+            safe_addnstr(stdscr, y, x, arrow, 0)
+            x += len(arrow)
+
+            prefix = "│  " * depth
+            safe_addnstr(stdscr, y, x, prefix, 0)
+            x += len(prefix)
+
+            # Pick color
+            if node.is_dir:
+                color = 2  # Directory color (green)
+            else:
+                if node.disabled:
+                    color = 3  # Disabled file color (red)
+                else:
+                    color = 1  # Normal file color (cyan)
+
+            # Show name
+            safe_addnstr(stdscr, y, x, node.display_name, color)
+            x += len(node.display_name)
+
+            # Show token count if greater than 0
+            if node.token_count > 0:
+                token_text = f" ({node.token_count} tk)"
+                if x + len(token_text) >= mx:
+                    token_text = token_text[:mx - x - 1] + "..."
+                safe_addnstr(stdscr, y, x, token_text, 0)
+
+        # Bottom line
         if copying_success:
-            m = "Successfully Saved to Clipboard"
-            p = m + " " * (mx - len(m))
-            safe_addnstr(stdscr, my - 1, 0, p, 0)
+            msg = "Successfully Saved to Clipboard"
+            padded = msg + " " * (mx - len(msg))
+            safe_addnstr(stdscr, my - 1, 0, padded, 4)  # Success message color
         else:
             ins = ""
             if flattened:
@@ -400,11 +409,13 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
             nd, _ = flattened[current_index]
             if nd.is_dir:
                 toggle_node(nd)
+                nd.calculate_token_count()
         elif shift_mode:
             if k == ord("E"):
                 nd, _ = flattened[current_index]
                 if nd.is_dir:
                     toggle_subtree(nd)
+                    nd.calculate_token_count()
             elif k == ord("A"):
                 nd, _ = flattened[current_index]
                 if nd.is_dir:
@@ -414,6 +425,7 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
                 nd, _ = flattened[current_index]
                 if nd.is_dir:
                     toggle_node(nd)
+                    nd.calculate_token_count()
             elif k == ord("a"):
                 nd, _ = flattened[current_index]
                 if nd.is_dir:
@@ -430,6 +442,7 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
                     copying_success = True
                     success_message_time = time.time()
 
+        # Quit
         if k in (ord("q"), ord("Q")):
             s = {}
             gather_state(root_node, s)
