@@ -33,7 +33,20 @@ IGNORED_PATTERNS = IGNORED_FOLDERS + IGNORED_MISC + IGNORED_LOGS
 ALLOWED_PYTHON = [".py", ".pyi", ".pyc", ".pyo", ".pyd"]
 ALLOWED_DOCS = [".txt", ".md", ".rst", ".docx", ".pdf", ".odt"]
 ALLOWED_CONFIG = [".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"]
-ALLOWED_SCRIPTS = [".sh", ".bat", ".ps1", ".bash", ".zsh", ".js", ".cs", ".html"]
+ALLOWED_SCRIPTS = [
+    # Shell Scripts
+    ".sh", ".bash", ".zsh", ".csh", ".ksh",
+    # Windows
+    ".bat", ".cmd", ".ps1", ".vbs",
+    # Web
+    ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
+    # Scripting
+    ".pl", ".php", ".tcl", ".lua",
+    # Compiled
+    ".java", ".cpp", ".c", ".h", ".hpp", ".cs", ".go", ".rs", ".swift", ".vb", ".fs",
+    # Data & Markup
+    ".sql", ".html", ".htm", ".css", ".scss", ".sass", ".less", ".xml"
+]
 ALLOWED_MEDIA = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".mp3", ".wav", ".mp4", ".avi", ".mkv"]
 ALLOWED_EXTENSIONS = ALLOWED_PYTHON + ALLOWED_DOCS + ALLOWED_CONFIG + ALLOWED_SCRIPTS + ALLOWED_MEDIA
 DEFAULT_COPY_FORMAT = "blocks"
