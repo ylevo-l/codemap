@@ -9,7 +9,7 @@ Scrollable, interactive ASCII tree view of a directory with the following featur
 4. Clipboard copying of visible, enabled files with a progress bar.
 5. Full state persistence: expanded, anonymized, file enablement.
 6. Single-file, efficient code with no extra modules.
-7. Optional SHIFT-based accelerated navigation for UP/DOWN and W/S.
+7. Optional SHIFT-based accelerated navigation for W/S.
 
 Usage:
 - [W]/[S]: Navigate the tree (accelerate if SHIFT is detected)
