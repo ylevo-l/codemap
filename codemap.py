@@ -9,7 +9,7 @@ Scrollable, interactive ASCII tree view of a directory with the following featur
 4. Clipboard copying of visible, enabled files with a progress bar.
 5. Full state persistence: expanded, anonymized, file enablement.
 6. Single-file, efficient code with no extra modules.
-7. Optional SHIFT-based accelerated navigation for W/S.
+7. Optional SHIFT-based accelerated navigation for UP/DOWN and W/S.
 
 Usage:
 - [W]/[S]: Navigate the tree (accelerate if SHIFT is detected)
@@ -22,6 +22,7 @@ Usage:
 
 import argparse, curses, json, os, random, string, subprocess, sys, time
 from typing import Any, Dict, Generator, List, Optional, Tuple
+import tiktoken  # Import tiktoken for accurate token counting
 
 STATE_FILE = ".tree_state.json"
 SUCCESS_MESSAGE_DURATION = 0.5
@@ -51,11 +52,20 @@ class AppConfig:
         self.copy_format = copy_format
         self.path_mode = path_mode
 
+# Initialize tiktoken encoding for the desired model
+try:
+    ENCODING = tiktoken.encoding_for_model("gpt-4o")  # Replace "gpt-4o" with your specific model if different
+except KeyError:
+    print("Error: Model encoding not found. Please check the model name or ensure it's supported by tiktoken.")
+    sys.exit(1)
+
 def count_tokens(content: str) -> int:
-    # Simple approximation: 1 token per 4 characters
-    return max(1, len(content) // 4)
+    """Accurately count tokens using tiktoken."""
+    tokens = ENCODING.encode(content)
+    return len(tokens)
 
 def copy_text_to_clipboard(t: str) -> None:
+    """Copy text to the system clipboard."""
     try:
         if sys.platform.startswith("win"):
             p = subprocess.Popen("clip", stdin=subprocess.PIPE, shell=True)
@@ -74,6 +84,7 @@ class FileFilter:
         self.ignored_patterns = ignored_patterns or []
         self.allowed_extensions = allowed_extensions or []
     def is_ignored(self, n: str) -> bool:
+        """Determine if a file or folder should be ignored based on patterns and extensions."""
         for p in self.ignored_patterns:
             if p in n:
                 return True
@@ -94,10 +105,13 @@ class TreeNode:
         self.children: List['TreeNode'] = []
         self.token_count: int = 0  # For files: token count; for dirs: cumulative token count
     def add_child(self, n: "TreeNode") -> None:
+        """Add a child TreeNode."""
         self.children.append(n)
     def sort_children(self) -> None:
+        """Sort children: directories first, then files alphabetically."""
         self.children.sort(key=lambda x: (not x.is_dir, x.display_name.lower()))
     def calculate_token_count(self) -> int:
+        """Recursively calculate the cumulative token count for directories."""
         if not self.is_dir:
             return self.token_count
         total = 0
@@ -107,6 +121,7 @@ class TreeNode:
         return self.token_count
 
 def build_tree(rp: str, f: FileFilter) -> TreeNode:
+    """Build the directory tree recursively."""
     root = TreeNode(rp, True, True)
     def w(p: TreeNode, d: str, depth: int = 0) -> None:
         if depth > MAX_TREE_DEPTH:
@@ -143,6 +158,7 @@ def build_tree(rp: str, f: FileFilter) -> TreeNode:
     return root
 
 def load_state(fp: str) -> Dict[str, Any]:
+    """Load the saved state from a JSON file."""
     if os.path.isfile(fp):
         try:
             with open(fp, "r", encoding="utf-8") as f:
@@ -152,6 +168,7 @@ def load_state(fp: str) -> Dict[str, Any]:
     return {}
 
 def save_state(fp: str, d: Dict[str, Any]) -> None:
+    """Save the current state to a JSON file."""
     try:
         with open(fp, "w", encoding="utf-8") as f:
             json.dump(d, f, indent=2)
@@ -159,6 +176,7 @@ def save_state(fp: str, d: Dict[str, Any]) -> None:
         pass
 
 def apply_state(n: TreeNode, s: Dict[str, Any]) -> None:
+    """Apply the saved state to the tree."""
     if n.path in s:
         st = s[n.path]
         n.expanded = st.get("expanded", n.is_dir)
@@ -175,6 +193,7 @@ def apply_state(n: TreeNode, s: Dict[str, Any]) -> None:
         n.calculate_token_count()
 
 def gather_state(n: TreeNode, s: Dict[str, Any]) -> None:
+    """Gather the current state of the tree for saving."""
     if n.path not in s:
         s[n.path] = {}
     s[n.path]["expanded"] = n.expanded
@@ -189,30 +208,36 @@ def gather_state(n: TreeNode, s: Dict[str, Any]) -> None:
         gather_state(c, s)
 
 def generate_anonymized_name() -> str:
+    """Generate a random anonymized folder name."""
     return random.choice(ANONYMIZED_PREFIXES) + "_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
 def toggle_node(n: TreeNode) -> None:
+    """Toggle the expansion state of a directory."""
     if n.is_dir:
         n.expanded = not n.expanded
 
 def anonymize_toggle(n: TreeNode) -> None:
+    """Toggle the anonymization state of a directory."""
     if n.is_dir:
         x = not n.anonymized
         n.anonymized = x
         n.display_name = generate_anonymized_name() if x else n.original_name
 
 def set_subtree_expanded(n: TreeNode, e: bool) -> None:
+    """Set the expansion state for a directory and all its subdirectories."""
     n.expanded = e
     for c in n.children:
         if c.is_dir:
             set_subtree_expanded(c, e)
 
 def toggle_subtree(n: TreeNode) -> None:
+    """Toggle the expansion state for a directory and all its subdirectories."""
     if n.is_dir:
         x = not n.expanded
         set_subtree_expanded(n, x)
 
 def anonymize_subtree(n: TreeNode) -> None:
+    """Toggle the anonymization state for a directory and all its subdirectories."""
     if n.is_dir:
         x = not n.anonymized
         n.anonymized = x
@@ -221,12 +246,14 @@ def anonymize_subtree(n: TreeNode) -> None:
             anonymize_subtree(c)
 
 def flatten_tree(n: TreeNode, d: int = 0) -> Generator[Tuple[TreeNode, int], None, None]:
+    """Flatten the tree into a list for easy navigation."""
     yield (n, d)
     if n.is_dir and n.expanded:
         for c in n.children:
             yield from flatten_tree(c, d + 1)
 
 def collect_visible_files(n: TreeNode, path_mode: str) -> List[Tuple[str, str]]:
+    """Collect all visible and enabled files for copying."""
     r = []
     def g(nd: TreeNode, p: List[str]) -> None:
         z = p + [nd.display_name]
@@ -246,6 +273,7 @@ def collect_visible_files(n: TreeNode, path_mode: str) -> List[Tuple[str, str]]:
     return r
 
 def copy_files_subloop(stdscr: Any, vf: List[Tuple[str, str]], fmt: str) -> str:
+    """Handle the copying of files with a progress bar."""
     lines = []
     my, mx = stdscr.getmaxyx()
     t = len(vf)
@@ -269,6 +297,7 @@ def copy_files_subloop(stdscr: Any, vf: List[Tuple[str, str]], fmt: str) -> str:
     return "".join(lines)
 
 def init_colors() -> None:
+    """Initialize color pairs for the UI."""
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_CYAN, -1)  # Files
@@ -277,6 +306,7 @@ def init_colors() -> None:
     curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Success message
 
 def safe_addnstr(stdscr: Any, y: int, x: int, s: str, c: int) -> None:
+    """Safely add a string to the screen, preventing overflow."""
     my, mx = stdscr.getmaxyx()
     if y < 0 or y >= my or x >= mx:
         return
@@ -287,6 +317,7 @@ def safe_addnstr(stdscr: Any, y: int, x: int, s: str, c: int) -> None:
         pass
 
 def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: str, path_mode: str) -> None:
+    """Main loop for the curses-based UI."""
     curses.curs_set(0)
     stdscr.nodelay(False)
     stdscr.keypad(True)
@@ -323,7 +354,7 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
         elif current_index >= scroll_offset + visible_lines:
             scroll_offset = current_index - visible_lines + 1
 
-        # Draw
+        # Draw the visible portion of the tree
         for i in range(scroll_offset, min(scroll_offset + visible_lines, len(flattened))):
             node, depth = flattened[i]
             is_selected = (i == current_index)
@@ -339,14 +370,11 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
             safe_addnstr(stdscr, y, x, prefix, 0)
             x += len(prefix)
 
-            # Pick color
+            # Pick color based on node type and state
             if node.is_dir:
                 color = 2  # Directory color (green)
             else:
-                if node.disabled:
-                    color = 3  # Disabled file color (red)
-                else:
-                    color = 1  # Normal file color (cyan)
+                color = 3 if node.disabled else 1  # Disabled file (red) or normal file (cyan)
 
             # Show name
             safe_addnstr(stdscr, y, x, node.display_name, color)
@@ -359,7 +387,7 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
                     token_text = token_text[:mx - x - 1] + "..."
                 safe_addnstr(stdscr, y, x, token_text, 0)
 
-        # Bottom line
+        # Bottom line: Instructions or success message
         if copying_success:
             msg = "Successfully Saved to Clipboard"
             padded = msg + " " * (mx - len(msg))
@@ -394,13 +422,15 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
         if k == -1:
             continue
 
-        if 65 <= k <= 90:
+        # Detect shift mode based on key case
+        if 65 <= k <= 90:  # Uppercase letters
             shift_mode = True
-        elif 97 <= k <= 122:
+        elif 97 <= k <= 122:  # Lowercase letters
             shift_mode = False
 
         sp = step_accel if shift_mode else step_normal
 
+        # Handle navigation and actions
         if k in (ord("w"), ord("W")):
             current_index = max(0, current_index - sp)
         elif k in (ord("s"), ord("S")):
@@ -442,7 +472,7 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
                     copying_success = True
                     success_message_time = time.time()
 
-        # Quit
+        # Quit the application
         if k in (ord("q"), ord("Q")):
             s = {}
             gather_state(root_node, s)
@@ -450,6 +480,7 @@ def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: st
             break
 
 def main() -> None:
+    """Parse arguments, build the tree, load state, and start the UI."""
     parser = argparse.ArgumentParser(
         description="Scrollable, interactive ASCII tree view of a directory."
     )
