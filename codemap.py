@@ -27,7 +27,7 @@ import tiktoken
 STATE_FILE = ".tree_state.json"
 SUCCESS_MESSAGE_DURATION = 0.5
 IGNORED_FOLDERS = ["__pycache__", "node_modules", "dist", "build", "venv", ".git", ".svn", ".hg", ".idea", ".vscode"]
-IGNORED_MISC = [".env", ".DS_Store", "Thumbs.db", ".bak", ".tmp", "desktop.ini", ".tree_state.json"]
+IGNORED_MISC = [".env", ".DS_Store", "Thumbs.db", ".bak", ".tmp", "desktop.ini", STATE_FILE]
 IGNORED_LOGS = [".log", ".db", ".key", ".pyc", ".exe", ".dll", ".so", ".dylib"]
 IGNORED_PATTERNS = IGNORED_FOLDERS + IGNORED_MISC + IGNORED_LOGS
 ALLOWED_PYTHON = [".py", ".pyi", ".pyc", ".pyo", ".pyd"]
