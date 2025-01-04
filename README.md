@@ -4,7 +4,7 @@ CodeMap is a single-file Python tool that provides a scrollable and interactive 
 
 ## Demo
 
-![CodeMap Demo](assets/codemap_demo.gif)
+![CodeMap Demo](assets/codemap.gif)
 
 ## Features
 
