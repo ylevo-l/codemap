@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Version: 1.5.0
 
 """
 Scrollable, interactive ASCII tree view of a directory with the following features:
@@ -20,36 +21,30 @@ Usage:
 - [q]: Quit (saves state to .tree_state.json)
 """
 
-import argparse, curses, json, os, random, string, subprocess, sys, time
-from typing import Any, Dict, Generator, List, Optional, Tuple
+import argparse, curses, json, os, random, string, subprocess, sys, threading, time
+from functools import partial
+from typing import Any, Dict, List, Optional, Tuple, Generator
 import tiktoken
 
 STATE_FILE = ".tree_state.json"
-SUCCESS_MESSAGE_DURATION = 0.5
-IGNORED_FOLDERS = ["__pycache__", "node_modules", "dist", "build", "venv", ".git", ".svn", ".hg", ".idea", ".vscode"]
-IGNORED_MISC = [".env", ".DS_Store", "Thumbs.db", ".bak", ".tmp", "desktop.ini", STATE_FILE]
-IGNORED_LOGS = [".log", ".db", ".key", ".pyc", ".exe", ".dll", ".so", ".dylib"]
-IGNORED_PATTERNS = IGNORED_FOLDERS + IGNORED_MISC + IGNORED_LOGS
-ALLOWED_PYTHON = [".py", ".pyi", ".pyc", ".pyo", ".pyd"]
-ALLOWED_DOCS = [".txt", ".md", ".rst", ".docx", ".pdf", ".odt"]
-ALLOWED_CONFIG = [".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"]
-ALLOWED_SCRIPTS = [
-    # Shell Scripts
-    ".sh", ".bash", ".zsh", ".csh", ".ksh",
-    # Windows
-    ".bat", ".cmd", ".ps1", ".vbs",
-    # Web
-    ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
-    # Scripting
-    ".pl", ".php", ".tcl", ".lua",
-    # Compiled
-    ".java", ".cpp", ".c", ".h", ".hpp", ".cs", ".go", ".rs", ".swift", ".vb", ".fs",
-    # Data & Markup
-    ".sql", ".html", ".htm", ".css", ".scss", ".sass", ".less", ".xml"
+SUCCESS_MESSAGE_DURATION = 1.0
+IGNORED_PATTERNS = [
+    "__pycache__", "node_modules", "dist", "build", "venv",
+    ".git", ".svn", ".hg", ".idea", ".vscode",
+    ".env", ".DS_Store", "Thumbs.db", ".bak", ".tmp",
+    "desktop.ini", ".log", ".db", ".key", ".pyc",
+    ".exe", ".dll", ".so", ".dylib"
 ]
-ALLOWED_MEDIA = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".mp3", ".wav", ".mp4", ".avi", ".mkv"]
-ALLOWED_EXTENSIONS = ALLOWED_PYTHON + ALLOWED_DOCS + ALLOWED_CONFIG + ALLOWED_SCRIPTS + ALLOWED_MEDIA
-DEFAULT_COPY_FORMAT = "blocks"
+ALLOWED_EXTENSIONS = [
+    ".py", ".pyi", ".pyc", ".pyo", ".pyd", ".txt", ".md", ".rst",
+    ".docx", ".pdf", ".odt", ".json", ".yaml", ".yml", ".toml",
+    ".ini", ".cfg", ".sh", ".bash", ".zsh", ".csh", ".ksh",
+    ".bat", ".cmd", ".ps1", ".vbs", ".js", ".ts", ".tsx",
+    ".jsx", ".mjs", ".cjs", ".pl", ".php", ".tcl", ".lua",
+    ".java", ".cpp", ".c", ".h", ".hpp", ".cs", ".go",
+    ".rs", ".swift", ".vb", ".fs", ".sql", ".html",
+    ".htm", ".css", ".scss", ".sass", ".less", ".xml"
+]
 COPY_FORMAT_PRESETS = {
     "blocks": "{path}:\n\"\"\"\n{content}\n\"\"\"\n",
     "lines": "{path}: {content}\n",
@@ -57,477 +52,582 @@ COPY_FORMAT_PRESETS = {
 }
 SCROLL_SPEED = {"normal": 1, "accelerated": 5}
 MAX_TREE_DEPTH = 10
-ANONYMIZED_PREFIXES = ["Folder", "Project", "Repo", "Alpha", "Beta", "Omega", "Block", "Archive", "Data", "Source"]
+ANONYMIZED_PREFIXES = [
+    "Archive", "DataSet", "Library", "Module", "Component", "Resource",
+    "Asset", "Document", "Record", "Media", "Collection", "Repository",
+    "Bundle", "Package", "Catalog", "Inventory", "Ledger", "Index",
+    "Database", "System", "Network", "Platform", "Framework", "Utility",
+    "Tool", "Service", "Gateway", "Interface", "Connector", "Adapter"
+]
 INPUT_TIMEOUT = 0.1
-
-class AppConfig:
-    def __init__(self, copy_format: str, path_mode: str):
-        self.copy_format = copy_format
-        self.path_mode = path_mode
 
 try:
     ENCODING = tiktoken.encoding_for_model("gpt-4o")
 except KeyError:
-    print("Error: Model encoding not found. Please check the model name or ensure it's supported by tiktoken.")
+    print("Error: Model encoding not found.")
     sys.exit(1)
 
 def count_tokens(content: str) -> int:
-    """Accurately count tokens using tiktoken."""
-    tokens = ENCODING.encode(content)
-    return len(tokens)
+    return len(ENCODING.encode(content))
 
 def copy_text_to_clipboard(t: str) -> None:
-    """Copy text to the system clipboard."""
     try:
         if sys.platform.startswith("win"):
-            p = subprocess.Popen("clip", stdin=subprocess.PIPE, shell=True)
-            p.communicate(input=t.encode("utf-16"))
+            subprocess.Popen("clip", stdin=subprocess.PIPE, shell=True).communicate(input=t.encode("utf-16"))
         elif sys.platform.startswith("darwin"):
-            p = subprocess.Popen("pbcopy", stdin=subprocess.PIPE)
-            p.communicate(input=t.encode("utf-8"))
+            subprocess.Popen("pbcopy", stdin=subprocess.PIPE).communicate(input=t.encode("utf-8"))
         else:
-            p = subprocess.Popen(["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE)
-            p.communicate(input=t.encode("utf-8"))
+            subprocess.Popen(["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE).communicate(input=t.encode("utf-8"))
     except:
         pass
 
+def strike(text: str) -> str:
+    return '\u0336' + text + '\u0336'
+
 class FileFilter:
-    def __init__(self, ignored_patterns: Optional[List[str]] = None, allowed_extensions: Optional[List[str]] = None):
-        self.ignored_patterns = ignored_patterns or []
-        self.allowed_extensions = allowed_extensions or []
-    def is_ignored(self, n: str) -> bool:
-        """Determine if a file or folder should be ignored based on patterns and extensions."""
-        for p in self.ignored_patterns:
-            if p in n:
-                return True
-        _, ext = os.path.splitext(n)
-        if self.allowed_extensions and ext and ext.lower() not in self.allowed_extensions:
+    def __init__(self, ignored_patterns: List[str], allowed_extensions: List[str]):
+        self.ignored_patterns = ignored_patterns
+        self.allowed_extensions = allowed_extensions
+
+    def is_ignored(self, name: str) -> bool:
+        if any(p in name for p in self.ignored_patterns):
+            return True
+        _, ext = os.path.splitext(name)
+        return bool(self.allowed_extensions and ext and ext.lower() not in self.allowed_extensions)
+
+class TreeNode:
+    def __init__(self, path: str, is_dir: bool, parent: Optional['TreeNode'] = None):
+        self.path = path
+        self.is_dir = is_dir
+        self.expanded = False if is_dir else None
+        self.original_name = os.path.basename(path)
+        self.display_name = self.original_name
+        self.render_name = self.original_name
+        self.anonymized = False
+        self.disabled = False if not is_dir else None
+        self.children: List['TreeNode'] = []
+        self.token_count: int = 0
+        self.parent = parent
+
+    def add_child(self, child: 'TreeNode') -> None:
+        self.children.append(child)
+
+    def sort_children(self) -> None:
+        self.children.sort(key=lambda x: (not x.is_dir, x.display_name.lower()))
+
+    def calculate_token_count(self) -> int:
+        if not self.is_dir:
+            return 0 if self.disabled else self.token_count
+        self.token_count = sum(child.calculate_token_count() for child in self.children if (child.is_dir and child.expanded) or (not child.is_dir and not child.disabled))
+        return self.token_count
+
+    def update_token_count(self, delta: int) -> None:
+        self.token_count += delta
+        if self.parent:
+            self.parent.update_token_count(delta)
+
+    def update_render_name(self) -> None:
+        self.render_name = self.display_name if self.is_dir else (strike(self.display_name) if self.disabled else self.display_name)
+
+def build_tree(root_path: str, file_filter: FileFilter, path_to_node: Dict[str, TreeNode], lock: threading.Lock) -> TreeNode:
+    root = TreeNode(root_path, True)
+    root.expanded = True
+    with lock:
+        path_to_node[root_path] = root
+
+    def recurse(node: TreeNode, current_path: str, depth: int) -> bool:
+        if depth > MAX_TREE_DEPTH:
+            return False
+        try:
+            entries = sorted(os.listdir(current_path))
+        except PermissionError:
+            return False
+        has_children = False
+        for entry in entries:
+            if file_filter.is_ignored(entry):
+                continue
+            full_path = os.path.join(current_path, entry)
+            is_dir = os.path.isdir(full_path)
+            child = TreeNode(full_path, is_dir, node)
+            if is_dir:
+                if recurse(child, full_path, depth + 1):
+                    node.add_child(child)
+                    path_to_node[full_path] = child
+                    has_children = True
+            else:
+                try:
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        child.token_count = count_tokens(f.read())
+                except:
+                    child.token_count = 0
+                if not child.disabled:
+                    node.update_token_count(child.token_count)
+                node.add_child(child)
+                path_to_node[full_path] = child
+                has_children = True
+        if has_children:
+            node.sort_children()
             return True
         return False
 
-class TreeNode:
-    def __init__(self, p: str, is_dir: bool = False, expanded: bool = False):
-        self.path = p
-        self.is_dir = is_dir
-        self.expanded = expanded
-        self.original_name = os.path.basename(p)
-        self.display_name = self.original_name
-        self.anonymized = False
-        self.disabled = None if is_dir else False
-        self.children: List['TreeNode'] = []
-        self.token_count: int = 0
-    def add_child(self, n: "TreeNode") -> None:
-        """Add a child TreeNode."""
-        self.children.append(n)
-    def sort_children(self) -> None:
-        """Sort children: directories first, then files alphabetically."""
-        self.children.sort(key=lambda x: (not x.is_dir, x.display_name.lower()))
-    def calculate_token_count(self) -> int:
-        """Recursively calculate the cumulative token count for directories."""
-        if not self.is_dir:
-            return self.token_count
-        total = 0
-        for child in self.children:
-            total += child.calculate_token_count()
-        self.token_count = total
-        return self.token_count
-
-def build_tree(rp: str, f: FileFilter) -> TreeNode:
-    """Build the directory tree recursively."""
-    root = TreeNode(rp, True, True)
-    def w(p: TreeNode, d: str, depth: int = 0) -> None:
-        if depth > MAX_TREE_DEPTH:
-            return
-        try:
-            e = sorted(os.listdir(d))
-        except:
-            return
-        flt = []
-        for i in e:
-            x = os.path.join(d, i)
-            if f.is_ignored(i):
-                continue
-            if os.path.isdir(x) or os.path.isfile(x):
-                flt.append(i)
-        for j in flt:
-            fp = os.path.join(d, j)
-            if os.path.isdir(fp):
-                c = TreeNode(fp, True, False)
-                p.add_child(c)
-                w(c, fp, depth + 1)
-            else:
-                c = TreeNode(fp, False, False)
-                try:
-                    with open(fp, "r", encoding="utf-8") as file:
-                        content = file.read()
-                        c.token_count = count_tokens(content)
-                except:
-                    c.token_count = 0
-                p.add_child(c)
-        p.sort_children()
-    w(root, rp, 0)
+    recurse(root, root_path, 0)
     root.calculate_token_count()
     return root
 
-def load_state(fp: str) -> Dict[str, Any]:
-    """Load the saved state from a JSON file."""
-    if os.path.isfile(fp):
+def load_state(file_path: str) -> Dict[str, Any]:
+    if os.path.isfile(file_path):
         try:
-            with open(fp, "r", encoding="utf-8") as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except json.JSONDecodeError:
             return {}
     return {}
 
-def save_state(fp: str, d: Dict[str, Any]) -> None:
-    """Save the current state to a JSON file."""
+def save_state(file_path: str, state: Dict[str, Any]) -> None:
     try:
-        with open(fp, "w", encoding="utf-8") as f:
-            json.dump(d, f, indent=2)
-    except:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except IOError:
         pass
 
-def apply_state(n: TreeNode, s: Dict[str, Any]) -> None:
-    """Apply the saved state to the tree."""
-    if n.path in s:
-        st = s[n.path]
-        n.expanded = st.get("expanded", n.is_dir)
-        n.anonymized = st.get("anonymized", False)
-        if n.anonymized:
-            n.display_name = st.get("anonymized_name", n.original_name)
-        else:
-            n.display_name = n.original_name
-        if not n.is_dir:
-            n.disabled = st.get("disabled", False)
-    for c in n.children:
-        apply_state(c, s)
-    if n.is_dir:
-        n.calculate_token_count()
-
-def gather_state(n: TreeNode, s: Dict[str, Any]) -> None:
-    """Gather the current state of the tree for saving."""
-    if n.path not in s:
-        s[n.path] = {}
-    s[n.path]["expanded"] = n.expanded
-    s[n.path]["anonymized"] = n.anonymized
-    if n.anonymized:
-        s[n.path]["anonymized_name"] = n.display_name
+def apply_state(node: TreeNode, state: Dict[str, Any], is_root: bool = False) -> None:
+    if is_root:
+        node.expanded = True
     else:
-        s[n.path]["anonymized_name"] = None
-    if not n.is_dir:
-        s[n.path]["disabled"] = n.disabled
-    for c in n.children:
-        gather_state(c, s)
+        node_state = state.get(node.path, {})
+        if node.is_dir:
+            node.expanded = node_state.get("expanded", node.is_dir)
+            node.anonymized = node_state.get("anonymized", False)
+            node.display_name = node_state.get("anonymized_name", node.original_name) if node.anonymized else node.original_name
+        else:
+            node.disabled = node_state.get("disabled", False)
+    node.update_render_name()
+    for child in node.children:
+        apply_state(child, state)
+    if node.is_dir:
+        node.calculate_token_count()
+
+def gather_state(node: TreeNode, state: Dict[str, Any], is_root: bool = False) -> None:
+    if is_root:
+        state[node.path] = {"expanded": True, "anonymized": node.anonymized, "anonymized_name": node.display_name if node.anonymized else None}
+    else:
+        if node.is_dir:
+            state[node.path] = {"expanded": node.expanded, "anonymized": node.anonymized, "anonymized_name": node.display_name if node.anonymized else None}
+        else:
+            state[node.path] = {"disabled": node.disabled}
+    for child in node.children:
+        gather_state(child, state)
 
 def generate_anonymized_name() -> str:
-    """Generate a random anonymized folder name."""
-    return random.choice(ANONYMIZED_PREFIXES) + "_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    return random.choice(ANONYMIZED_PREFIXES) + "_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
 
-def toggle_node(n: TreeNode) -> None:
-    """Toggle the expansion state of a directory."""
-    if n.is_dir:
-        n.expanded = not n.expanded
+def toggle_node(node: TreeNode) -> None:
+    if node.is_dir:
+        node.expanded = not node.expanded
+        node.update_render_name()
 
-def anonymize_toggle(n: TreeNode) -> None:
-    """Toggle the anonymization state of a directory."""
-    if n.is_dir:
-        x = not n.anonymized
-        n.anonymized = x
-        n.display_name = generate_anonymized_name() if x else n.original_name
+def anonymize_toggle(node: TreeNode) -> None:
+    if node.is_dir:
+        node.anonymized = not node.anonymized
+        node.display_name = generate_anonymized_name() if node.anonymized else node.original_name
+        node.update_render_name()
 
-def set_subtree_expanded(n: TreeNode, e: bool) -> None:
-    """Set the expansion state for a directory and all its subdirectories."""
-    n.expanded = e
-    for c in n.children:
-        if c.is_dir:
-            set_subtree_expanded(c, e)
+def set_subtree_expanded(node: TreeNode, expanded: bool) -> None:
+    if node.is_dir:
+        node.expanded = expanded
+        node.update_render_name()
+        for child in node.children:
+            set_subtree_expanded(child, expanded)
 
-def toggle_subtree(n: TreeNode) -> None:
-    """Toggle the expansion state for a directory and all its subdirectories."""
-    if n.is_dir:
-        x = not n.expanded
-        set_subtree_expanded(n, x)
+def toggle_subtree(node: TreeNode) -> None:
+    if node.is_dir:
+        set_subtree_expanded(node, not node.expanded)
 
-def anonymize_subtree(n: TreeNode) -> None:
-    """Toggle the anonymization state for a directory and all its subdirectories."""
-    if n.is_dir:
-        x = not n.anonymized
-        n.anonymized = x
-        n.display_name = generate_anonymized_name() if x else n.original_name
-        for c in n.children:
-            anonymize_subtree(c)
+def anonymize_subtree(node: TreeNode) -> None:
+    if node.is_dir:
+        node.anonymized = not node.anonymized
+        node.display_name = generate_anonymized_name() if node.anonymized else node.original_name
+        node.update_render_name()
+        for child in node.children:
+            anonymize_subtree(child)
 
-def flatten_tree(n: TreeNode, d: int = 0) -> Generator[Tuple[TreeNode, int], None, None]:
-    """Flatten the tree into a list for easy navigation."""
-    yield (n, d)
-    if n.is_dir and n.expanded:
-        for c in n.children:
-            yield from flatten_tree(c, d + 1)
+def flatten_tree(node: TreeNode, depth: int = 0, ancestor_has_tokens: bool = False) -> Generator[Tuple[TreeNode, int, bool], None, None]:
+    show_tokens = False
+    if not ancestor_has_tokens and node.token_count > 0 and node.is_dir:
+        show_tokens = True
+        ancestor_has_tokens = True
+    yield (node, depth, show_tokens)
+    if node.is_dir and node.expanded:
+        for child in node.children:
+            yield from flatten_tree(child, depth + 1, ancestor_has_tokens)
 
-def collect_visible_files(n: TreeNode, path_mode: str) -> List[Tuple[str, str]]:
-    """Collect all visible and enabled files for copying."""
-    r = []
-    def g(nd: TreeNode, p: List[str]) -> None:
-        z = p + [nd.display_name]
+def collect_visible_files(node: TreeNode, path_mode: str) -> List[Tuple[str, str]]:
+    files = []
+    def recurse(nd: TreeNode, path: List[str]):
+        current_path = path + [nd.display_name]
         if nd.is_dir and nd.expanded:
-            for ch in nd.children:
-                g(ch, z)
-        elif not nd.is_dir and nd.disabled == False:
-            rp = os.path.join(*z) if path_mode == "relative" else nd.display_name
-            ct = ""
+            for child in nd.children:
+                recurse(child, current_path)
+        elif not nd.is_dir and not nd.disabled:
+            display_path = os.path.join(*current_path) if path_mode == "relative" else nd.display_name
             try:
                 with open(nd.path, "r", encoding="utf-8") as f:
-                    ct = f.read()
+                    content = f.read()
             except:
-                ct = "<Could not read file>"
-            r.append((rp, ct))
-    g(n, [])
-    return r
+                content = "<Could not read file>"
+            files.append((display_path, content))
+    recurse(node, [])
+    return files
 
-def copy_files_subloop(stdscr: Any, vf: List[Tuple[str, str]], fmt: str) -> str:
-    """Handle the copying of files with a progress bar."""
-    lines = []
+def copy_files_subloop(stdscr: Any, files: List[Tuple[str, str]], fmt: str) -> str:
+    copied_text = []
     my, mx = stdscr.getmaxyx()
-    t = len(vf)
-    for i, (rp, ct) in enumerate(vf, 1):
-        fs = fmt
-        if fs not in COPY_FORMAT_PRESETS:
-            fs = "blocks"
-        block = COPY_FORMAT_PRESETS[fs].format(path=rp, content=ct if ct else "<Could not read file>")
-        lines.append(block)
-        bw = max(10, mx - 25)
-        dn = int(bw * (i / t)) if t else 0
-        rm = bw - dn
-        bs = "#" * dn + " " * rm
-        ps = f"Copying {i}/{t} files: [{bs}]"
-        stdscr.clear()
+    total = len(files)
+    progress_bar_length = max(10, mx - 30)
+    for idx, (path, content) in enumerate(files, 1):
+        copied_text.append(COPY_FORMAT_PRESETS.get(fmt, COPY_FORMAT_PRESETS["blocks"]).format(path=path, content=content or "<Could not read file>"))
+        progress = int((idx / total) * progress_bar_length)
+        progress_bar = "#" * progress + "-" * (progress_bar_length - progress)
+        status = f"Copying {idx}/{total} files: [{progress_bar}]"
         try:
-            stdscr.addnstr(my - 1, 0, ps, mx - 1)
-        except:
+            stdscr.addstr(my - 1, 0, status[:mx-1], curses.color_pair(7))
+        except curses.error:
             pass
         stdscr.refresh()
-    return "".join(lines)
+        time.sleep(0.02)
+    return ''.join(copied_text)
 
 def init_colors() -> None:
-    """Initialize color pairs for the UI."""
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_CYAN, -1)  # Files
-    curses.init_pair(2, curses.COLOR_GREEN, -1)  # Directories
-    curses.init_pair(3, curses.COLOR_RED, -1)    # Disabled files
-    curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Success message
+    curses.init_pair(1, curses.COLOR_CYAN, -1)    # Files
+    curses.init_pair(2, curses.COLOR_GREEN, -1)   # Directories
+    curses.init_pair(3, curses.COLOR_RED, -1)     # Disabled files
+    curses.init_pair(4, curses.COLOR_YELLOW, -1)  # Token labels
+    curses.init_pair(5, curses.COLOR_YELLOW, -1)  # Additional labels
+    curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Success message
+    curses.init_pair(7, curses.COLOR_WHITE, -1)    # General text and symbols
 
-def safe_addnstr(stdscr: Any, y: int, x: int, s: str, c: int) -> None:
-    """Safely add a string to the screen, preventing overflow."""
-    my, mx = stdscr.getmaxyx()
-    if y < 0 or y >= my or x >= mx:
-        return
-    s = s[:max(0, mx - x)]
-    try:
-        stdscr.addstr(y, x, s, curses.color_pair(c))
-    except:
-        pass
+def safe_addnstr(stdscr: Any, y: int, x: int, text: str, color: int) -> None:
+    max_y, max_x = stdscr.getmaxyx()
+    if 0 <= y < max_y and 0 <= x < max_x:
+        try:
+            stdscr.addnstr(y, x, text, max_x - x - 1, curses.color_pair(color))
+        except curses.error:
+            pass
 
-def run_curses(stdscr: Any, root_node: TreeNode, states: Dict[str, Any], fmt: str, path_mode: str) -> None:
-    """Main loop for the curses-based UI."""
+def run_curses(
+    stdscr: Any,
+    root_node: TreeNode,
+    path_to_node: Dict[str, TreeNode],
+    fmt: str,
+    path_mode: str,
+    tree_changed_flag: threading.Event,
+    lock: threading.Lock
+) -> None:
     curses.curs_set(0)
     stdscr.nodelay(False)
     stdscr.keypad(True)
     curses.halfdelay(int(INPUT_TIMEOUT * 10))
     init_colors()
-
-    current_index = 0
-    scroll_offset = 0
-    shift_mode = False
-    copying_success = False
-    success_message_time = 0.0
-    step_normal = SCROLL_SPEED["normal"]
-    step_accel = SCROLL_SPEED["accelerated"]
+    current_index, scroll_offset, shift_mode = 0, 0, False
+    copying_success, success_message_time = False, 0.0
+    step_normal, step_accel = SCROLL_SPEED["normal"], SCROLL_SPEED["accelerated"]
+    flattened_cache: List[Tuple[TreeNode, int, bool]] = []
+    tree_changed, total_tokens = True, root_node.token_count
 
     while True:
         now = time.time()
         if copying_success and (now - success_message_time > SUCCESS_MESSAGE_DURATION):
             copying_success = False
-
-        stdscr.clear()
-        my, mx = stdscr.getmaxyx()
-        flattened = list(flatten_tree(root_node))
-        visible_lines = my - 1
-
-        # Enforce bounds
-        if current_index < 0:
-            current_index = 0
-        elif current_index >= len(flattened):
-            current_index = max(0, len(flattened) - 1)
-
-        # Scroll offset
+        if tree_changed_flag.is_set():
+            with lock:
+                flattened_cache = list(flatten_tree(root_node))
+            tree_changed, tree_changed_flag.clear()
+            total_tokens = root_node.token_count
+        if tree_changed:
+            with lock:
+                flattened_cache = list(flatten_tree(root_node))
+            tree_changed, total_tokens = False, root_node.token_count
+        max_y, max_x = stdscr.getmaxyx()
+        visible_lines = max_y - 1
+        with lock:
+            current_index = max(0, min(current_index, len(flattened_cache) - 1))
         if current_index < scroll_offset:
             scroll_offset = current_index
         elif current_index >= scroll_offset + visible_lines:
             scroll_offset = current_index - visible_lines + 1
-
-        # Draw the visible portion of the tree
-        for i in range(scroll_offset, min(scroll_offset + visible_lines, len(flattened))):
-            node, depth = flattened[i]
-            is_selected = (i == current_index)
-
-            y = i - scroll_offset
-            x = 0
-
-            arrow = "> " if is_selected else "  "
-            safe_addnstr(stdscr, y, x, arrow, 0)
-            x += len(arrow)
-
-            prefix = "│  " * depth
-            safe_addnstr(stdscr, y, x, prefix, 0)
-            x += len(prefix)
-
-            # Pick color based on node type and state
-            if node.is_dir:
-                color = 2  # Directory color (green)
-            else:
-                color = 3 if node.disabled else 1  # Disabled file (red) or normal file (cyan)
-
-            # Show name
-            safe_addnstr(stdscr, y, x, node.display_name, color)
-            x += len(node.display_name)
-
-            # Show token count if greater than 0
-            if node.token_count > 0:
-                token_text = f" ({node.token_count} tk)"
-                if x + len(token_text) >= mx:
-                    token_text = token_text[:mx - x - 1] + "..."
-                safe_addnstr(stdscr, y, x, token_text, 0)
-
-        # Bottom line: Instructions or success message
-        if copying_success:
-            msg = "Successfully Saved to Clipboard"
-            padded = msg + " " * (mx - len(msg))
-            safe_addnstr(stdscr, my - 1, 0, padded, 4)  # Success message color
-        else:
-            ins = ""
-            if flattened:
-                node, _ = flattened[current_index]
+        stdscr.erase()
+        with lock:
+            for i in range(scroll_offset, min(scroll_offset + visible_lines, len(flattened_cache))):
+                node, depth, show_tokens = flattened_cache[i]
+                is_selected, y, x = (i == current_index), i - scroll_offset, 0
+                arrow = "> " if is_selected else "  "
+                safe_addnstr(stdscr, y, x, arrow, 0)
+                x += len(arrow)
+                prefix = "│  " * depth
+                safe_addnstr(stdscr, y, x, prefix, 0)
+                x += len(prefix)
+                
+                # Add improved expand/collapse symbols for directories in white
                 if node.is_dir:
-                    if shift_mode:
-                        ins += "[E] Toggle All"
-                        if not node.anonymized:
-                            ins += "  [A] Anonymize All"
-                        else:
-                            ins += "  [A] De-Anonymize All"
-                    else:
-                        ins += "[e] Toggle"
-                        if not node.anonymized:
-                            ins += "  [a] Anonymize"
-                        else:
-                            ins += "  [a] De-Anonymize"
-                else:
-                    if node.disabled:
-                        ins += "[d] Enable"
-                    else:
-                        ins += "[d] Disable"
-                ins += "   [c] Copy"
-            safe_addnstr(stdscr, my - 1, 0, ins, 0)
-
-        stdscr.refresh()
-        k = stdscr.getch()
-        if k == -1:
-            continue
-
-        # Detect shift mode based on key case
-        if 65 <= k <= 90:  # Uppercase letters
-            shift_mode = True
-        elif 97 <= k <= 122:  # Lowercase letters
-            shift_mode = False
-
-        sp = step_accel if shift_mode else step_normal
-
-        # Handle navigation and actions
-        if k in (ord("w"), ord("W")):
-            current_index = max(0, current_index - sp)
-        elif k in (ord("s"), ord("S")):
-            current_index = min(len(flattened) - 1, current_index + sp)
-        elif k in (curses.KEY_ENTER, 10, 13):
-            nd, _ = flattened[current_index]
-            if nd.is_dir:
-                toggle_node(nd)
-                nd.calculate_token_count()
-        elif shift_mode:
-            if k == ord("E"):
-                nd, _ = flattened[current_index]
-                if nd.is_dir:
-                    toggle_subtree(nd)
-                    nd.calculate_token_count()
-            elif k == ord("A"):
-                nd, _ = flattened[current_index]
-                if nd.is_dir:
-                    anonymize_subtree(nd)
+                    symbol = "▾ " if node.expanded else "▸ "
+                    symbol_color = 7  # White for symbols
+                    safe_addnstr(stdscr, y, x, symbol, symbol_color)
+                    x += len(symbol)
+                
+                # Set color based on node type
+                color = 2 if node.is_dir else (3 if node.disabled else 1)
+                safe_addnstr(stdscr, y, x, node.render_name, color)
+                x += len(node.render_name)
+                if show_tokens and node.token_count > 0:
+                    separator = " | "
+                    if x + len(separator) < max_x:
+                        safe_addnstr(stdscr, y, x, separator, 7)
+                        x += len(separator)
+                    tokens_label = "Tokens: "
+                    tokens_number = f"{node.token_count}"
+                    if x + len(tokens_label) < max_x:
+                        safe_addnstr(stdscr, y, x, tokens_label, 4)
+                        x += len(tokens_label)
+                    if x + len(tokens_number) < max_x:
+                        safe_addnstr(stdscr, y, x, tokens_number, 7)
+        if copying_success:
+            safe_addnstr(stdscr, max_y - 1, 0, "Successfully Copied to Clipboard".ljust(max_x), 6)
         else:
-            if k == ord("e"):
-                nd, _ = flattened[current_index]
-                if nd.is_dir:
-                    toggle_node(nd)
-                    nd.calculate_token_count()
-            elif k == ord("a"):
-                nd, _ = flattened[current_index]
-                if nd.is_dir:
-                    anonymize_toggle(nd)
-            elif k == ord("d"):
-                nd, _ = flattened[current_index]
-                if not nd.is_dir:
-                    nd.disabled = not nd.disabled
-            elif k == ord("c"):
-                vf = collect_visible_files(root_node, path_mode)
-                if vf:
-                    ft = copy_files_subloop(stdscr, vf, fmt)
-                    copy_text_to_clipboard(ft)
-                    copying_success = True
-                    success_message_time = time.time()
-
-        # Quit the application
-        if k in (ord("q"), ord("Q")):
-            s = {}
-            gather_state(root_node, s)
-            save_state(STATE_FILE, s)
+            labels = []
+            with lock:
+                if flattened_cache:
+                    node, _, _ = flattened_cache[current_index]
+                    if node.is_dir:
+                        if shift_mode:
+                            labels.extend([("[E] Toggle All", 7), ("[A] " + ("Anonymize All" if not node.anonymized else "De-Anonymize All"), 7)])
+                        else:
+                            labels.extend([("[e] Toggle", 7), ("[a] " + ("Anonymize" if not node.anonymized else "De-Anonymize"), 7)])
+                    else:
+                        labels.append(("[d] " + ("Enable" if node.disabled else "Disable"), 7))
+                    labels.append(("[c] Copy", 7))
+                else:
+                    labels.append(("No files to display.", 7))
+            with lock:
+                tokens_visible = any(
+                    show_tokens for _, _, show_tokens in flattened_cache[scroll_offset:scroll_offset + visible_lines]
+                )
+            if not tokens_visible:
+                if total_tokens > 0:
+                    labels.extend([("|", 7), ("Tokens:", 4), (str(total_tokens), 7)])
+                else:
+                    labels.extend([("|", 7), ("No tokens to copy.", 4)])
+            x_position = 0
+            for text, color in labels:
+                safe_addnstr(stdscr, max_y - 1, x_position, text, color)
+                x_position += len(text) + 2
+        stdscr.refresh()
+        try:
+            key = stdscr.getch()
+        except KeyboardInterrupt:
+            key = ord('q')
+        if key == -1:
+            continue
+        shift_mode = True if 65 <= key <= 90 else False if 97 <= key <= 122 else shift_mode
+        step = step_accel if shift_mode else step_normal
+        if key in (ord("w"), ord("W")):
+            current_index = max(0, current_index - step)
+        elif key in (ord("s"), ord("S")):
+            current_index = min(len(flattened_cache) - 1, current_index + step)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            with lock:
+                node, _, _ = flattened_cache[current_index]
+                if node.is_dir:
+                    toggle_node(node)
+                    node.calculate_token_count()
+                    if node.parent:
+                        node.parent.calculate_token_count()
+                    tree_changed_flag.set()
+        elif shift_mode:
+            with lock:
+                node, _, _ = flattened_cache[current_index]
+                if node.is_dir:
+                    if key == ord("E"):
+                        toggle_subtree(node)
+                        node.calculate_token_count()
+                        if node.parent:
+                            node.parent.calculate_token_count()
+                        tree_changed_flag.set()
+                    elif key == ord("A"):
+                        anonymize_subtree(node)
+                        node.calculate_token_count()
+                        if node.parent:
+                            node.parent.calculate_token_count()
+                        tree_changed_flag.set()
+        else:
+            with lock:
+                node, _, _ = flattened_cache[current_index]
+                if key == ord("e") and node.is_dir:
+                    toggle_node(node)
+                    node.calculate_token_count()
+                    if node.parent:
+                        node.parent.calculate_token_count()
+                    tree_changed_flag.set()
+                elif key == ord("a") and node.is_dir:
+                    anonymize_toggle(node)
+                    node.calculate_token_count()
+                    if node.parent:
+                        node.parent.calculate_token_count()
+                    tree_changed_flag.set()
+                elif key == ord("d") and not node.is_dir:
+                    previous_tokens = node.token_count if not node.disabled else 0
+                    node.disabled = not node.disabled
+                    node.update_render_name()
+                    new_tokens = node.token_count if not node.disabled else 0
+                    delta = new_tokens - previous_tokens
+                    if node.parent:
+                        node.parent.update_token_count(delta)
+                    tree_changed_flag.set()
+                elif key == ord("c"):
+                    files_to_copy = collect_visible_files(node, path_mode)
+            if key == ord("c") and files_to_copy:
+                copied_text = copy_files_subloop(stdscr, files_to_copy, fmt)
+                copy_text_to_clipboard(copied_text)
+                copying_success, success_message_time = True, time.time()
+        if key in (ord("q"), ord("Q")):
+            state = {}
+            with lock:
+                gather_state(root_node, state, is_root=True)
+            save_state(STATE_FILE, state)
             curses.endwin()
-            break
+            sys.exit(0)
+
+def calculate_token_counts(
+    root: TreeNode,
+    path_to_node: Dict[str, TreeNode],
+    tree_changed_flag: threading.Event,
+    lock: threading.Lock
+) -> None:
+    while True:
+        with lock:
+            for node in path_to_node.values():
+                if not node.is_dir and node.token_count == 0 and not node.disabled:
+                    try:
+                        with open(node.path, "r", encoding="utf-8") as f:
+                            node.token_count = count_tokens(f.read())
+                    except:
+                        node.token_count = 0
+                    if node.parent:
+                        node.parent.update_token_count(node.token_count)
+            tree_changed_flag.set()
+        time.sleep(5)
+
+def scan_filesystem(
+    root_path: str,
+    file_filter: FileFilter,
+    path_to_node: Dict[str, TreeNode],
+    tree_changed_flag: threading.Event,
+    stop_event: threading.Event,
+    lock: threading.Lock
+) -> None:
+    previous_state = {}
+    with lock:
+        for path, node in path_to_node.items():
+            if not node.is_dir:
+                try:
+                    previous_state[path] = os.path.getmtime(path)
+                except:
+                    previous_state[path] = None
+    while not stop_event.is_set():
+        current_state = {}
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            dirnames[:] = [d for d in dirnames if not file_filter.is_ignored(d)]
+            for name in filenames:
+                if file_filter.is_ignored(name):
+                    continue
+                full_path = os.path.join(dirpath, name)
+                try:
+                    current_state[full_path] = os.path.getmtime(full_path)
+                except:
+                    current_state[full_path] = None
+        added = set(current_state.keys()) - set(previous_state.keys())
+        removed = set(previous_state.keys()) - set(current_state.keys())
+        modified = {path for path in current_state.keys() & previous_state.keys() if current_state[path] != previous_state[path]}
+        if added or removed or modified:
+            with lock:
+                for path in added:
+                    is_dir = os.path.isdir(path)
+                    parent_path = os.path.dirname(path)
+                    parent_node = path_to_node.get(parent_path)
+                    if parent_node and parent_node.is_dir and parent_node.expanded:
+                        new_node = TreeNode(path, is_dir, parent_node)
+                        if not is_dir:
+                            try:
+                                with open(path, "r", encoding="utf-8") as f:
+                                    new_node.token_count = count_tokens(f.read())
+                            except:
+                                new_node.token_count = 0
+                            if not new_node.disabled:
+                                parent_node.update_token_count(new_node.token_count)
+                        parent_node.add_child(new_node)
+                        parent_node.sort_children()
+                        path_to_node[path] = new_node
+                for path in removed:
+                    node = path_to_node.get(path)
+                    if node:
+                        parent = node.parent
+                        if parent:
+                            parent.children.remove(node)
+                            if not node.is_dir and not node.disabled:
+                                parent.update_token_count(-node.token_count)
+                        del path_to_node[path]
+                for path in modified:
+                    node = path_to_node.get(path)
+                    if node and not node.is_dir and not node.disabled:
+                        try:
+                            with open(path, "r", encoding="utf-8") as f:
+                                new_count = count_tokens(f.read())
+                        except:
+                            new_count = 0
+                        delta = new_count - node.token_count
+                        node.token_count = new_count
+                        if node.parent:
+                            node.parent.update_token_count(delta)
+            tree_changed_flag.set()
+        previous_state = current_state
+        time.sleep(1)
 
 def main() -> None:
-    """Parse arguments, build the tree, load state, and start the UI."""
-    parser = argparse.ArgumentParser(
-        description="Scrollable, interactive ASCII tree view of a directory."
-    )
-    parser.add_argument(
-        "directory",
-        nargs="?",
-        default=".",
-        help="Directory to display (defaults to current)."
-    )
-    parser.add_argument(
-        "--copy-format",
-        choices=["blocks", "lines", "raw"],
-        default=DEFAULT_COPY_FORMAT,
-        help="Format of copied files."
-    )
-    parser.add_argument(
-        "--path-mode",
-        choices=["relative", "basename"],
-        default="relative",
-        help="Display full relative paths or just the file/folder name."
-    )
+    parser = argparse.ArgumentParser(description="Scrollable, interactive ASCII tree view of a directory.")
+    parser.add_argument("directory", nargs="?", default=".", help="Directory to display (defaults to current).")
+    parser.add_argument("--copy-format", choices=["blocks", "lines", "raw"], default="blocks", help="Format of copied files.")
+    parser.add_argument("--path-mode", choices=["relative", "basename"], default="relative", help="Display full relative paths or just the file/folder name.")
     args = parser.parse_args()
     if not os.path.isdir(args.directory):
         print(f"Error: '{args.directory}' is not a directory.")
         sys.exit(1)
-    f = FileFilter(
-        ignored_patterns=IGNORED_PATTERNS,
-        allowed_extensions=ALLOWED_EXTENSIONS
-    )
-    rp = os.path.abspath(args.directory)
-    root = build_tree(rp, f)
-    st = load_state(STATE_FILE)
-    apply_state(root, st)
-    curses.wrapper(run_curses, root, st, args.copy_format, args.path_mode)
+    file_filter = FileFilter(IGNORED_PATTERNS, ALLOWED_EXTENSIONS)
+    root_path = os.path.abspath(args.directory)
+    path_to_node: Dict[str, TreeNode] = {}
+    lock = threading.Lock()
+    root_node = build_tree(root_path, file_filter, path_to_node, lock)
+    saved_state = load_state(STATE_FILE)
+    with lock:
+        apply_state(root_node, saved_state, is_root=True)
+    tree_changed_flag = threading.Event()
+    stop_event = threading.Event()
+    threading.Thread(target=calculate_token_counts, args=(root_node, path_to_node, tree_changed_flag, lock), daemon=True).start()
+    threading.Thread(target=scan_filesystem, args=(root_path, file_filter, path_to_node, tree_changed_flag, stop_event, lock), daemon=True).start()
+    try:
+        curses.wrapper(
+            partial(
+                run_curses,
+                root_node=root_node,
+                path_to_node=path_to_node,
+                fmt=args.copy_format,
+                path_mode=args.path_mode,
+                tree_changed_flag=tree_changed_flag,
+                lock=lock
+            )
+        )
+    finally:
+        stop_event.set()
 
 if __name__ == "__main__":
     main()
