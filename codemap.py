@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+
+import argparse, curses, json, os, random, string, subprocess, sys, threading, time
+from functools import partial
+from typing import Any, Dict, List, Optional, Tuple, Generator
+import tiktoken
 
 """
 Scrollable, interactive ASCII tree view of a directory with the following features:
@@ -20,11 +24,6 @@ Usage:
 - [c]: Copy all visible, enabled files to the clipboard
 - [q]: Quit (saves state to .tree_state.json)
 """
-
-import argparse, curses, json, os, random, string, subprocess, sys, threading, time
-from functools import partial
-from typing import Any, Dict, List, Optional, Tuple, Generator
-import tiktoken
 
 STATE_FILE = ".tree_state.json"
 SUCCESS_MESSAGE_DURATION = 1.0
