@@ -1,6 +1,6 @@
 # CodeMap
 
-CodeMap is a single-file Python tool that provides a scrollable and interactive ASCII tree view of a directory. It allows organized viewing and copying of code structures with features like anonymization and state persistence.
+This script was designed with one goal: maximizing workflow. It empowers users to efficiently prepare a codebase for a language model. Through a navigable tree interface, users can select specific files and then copy them, formatted as a single prompt, directly to the clipboard.
 
 ## Demo
 
