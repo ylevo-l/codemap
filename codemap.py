@@ -37,7 +37,7 @@ IGNORED_PATTERNS = [
 ]
 ALLOWED_EXTENSIONS = [
     ".py", ".pyi", ".pyc", ".pyo", ".pyd", ".txt", ".md", ".rst",
-    ".docx", ".pdf", ".odt", ".json", ".yaml", ".yml", ".toml",
+    ".docx", ".pdf", ".odt", ".yaml", ".yml", ".toml",
     ".ini", ".cfg", ".sh", ".bash", ".zsh", ".csh", ".ksh",
     ".bat", ".cmd", ".ps1", ".vbs", ".js", ".ts", ".tsx",
     ".jsx", ".mjs", ".cjs", ".pl", ".php", ".tcl", ".lua",
@@ -285,7 +285,12 @@ def copy_files_subloop(stdscr: Any, files: List[Tuple[str, str]], fmt: str) -> s
     total = len(files)
     progress_bar_length = max(10, mx - 30)
     for idx, (path, content) in enumerate(files, 1):
-        copied_text.append(COPY_FORMAT_PRESETS.get(fmt, COPY_FORMAT_PRESETS["blocks"]).format(path=path, content=content or "<Could not read file>"))
+        copied_text.append(
+            COPY_FORMAT_PRESETS.get(fmt, COPY_FORMAT_PRESETS["blocks"]).format(
+                path=path,
+                content=content or "<Could not read file>"
+            )
+        )
         progress = int((idx / total) * progress_bar_length)
         progress_bar = "#" * progress + "-" * (progress_bar_length - progress)
         status = f"Copying {idx}/{total} files: [{progress_bar}]"
@@ -294,7 +299,6 @@ def copy_files_subloop(stdscr: Any, files: List[Tuple[str, str]], fmt: str) -> s
         except curses.error:
             pass
         stdscr.refresh()
-        time.sleep(0.02)
     return ''.join(copied_text)
 
 def init_colors() -> None:
